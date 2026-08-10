@@ -4,6 +4,7 @@
 
 use actions_true_perf_lib::commands::{build_portfolio, do_import};
 use actions_true_perf_lib::db;
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::path::Path;
 use std::str::FromStr;
@@ -25,6 +26,58 @@ fn read_samples() -> Option<(String, String)> {
 
 fn dec(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
+}
+
+#[test]
+fn edit_order_archives_original_and_survives_reimport() {
+    let csv = "\
+Date,Désignation,Qté,Cours,Crédit (€),Débit (€)
+16/05/2025,ACH CPT NEXITY,17,9.6,,164.02
+";
+    let conn = db::open(Path::new(":memory:")).unwrap();
+    do_import(&conn, "releve.csv", csv).unwrap();
+
+    let p = build_portfolio(&conn).unwrap();
+    let lot = &p.positions[0].lots[0];
+    assert!(!lot.edited);
+    let tx_id = lot.tx_id.unwrap();
+
+    // Édition : nouvelle date, quantité, prix, frais.
+    db::update_transaction(
+        &conn,
+        tx_id,
+        Some(NaiveDate::from_ymd_opt(2025, 5, 15).unwrap()),
+        &dec("18"),
+        &dec("9.50"),
+        &dec("1.00"),
+    )
+    .unwrap();
+
+    let p = build_portfolio(&conn).unwrap();
+    let lot = &p.positions[0].lots[0];
+    assert!(lot.edited);
+    assert_eq!(lot.acquisition_date.unwrap().to_string(), "2025-05-15");
+    assert_eq!(lot.initial_quantity, dec("18"));
+    assert_eq!(lot.unit_cost, dec("9.50"));
+    assert_eq!(lot.fees, dec("1.00"));
+
+    // Réimporter le même fichier ne recrée pas l'ordre dans sa version
+    // d'origine : l'empreinte n'a pas changé.
+    let r = do_import(&conn, "releve.csv", csv).unwrap();
+    assert_eq!(r.inserted, 0);
+    let p = build_portfolio(&conn).unwrap();
+    assert_eq!(p.positions[0].lots.len(), 1);
+    assert_eq!(p.positions[0].lots[0].unit_cost, dec("9.50"));
+
+    // Restauration : retour aux valeurs importées.
+    db::revert_transaction(&conn, tx_id).unwrap();
+    let p = build_portfolio(&conn).unwrap();
+    let lot = &p.positions[0].lots[0];
+    assert!(!lot.edited);
+    assert_eq!(lot.acquisition_date.unwrap().to_string(), "2025-05-16");
+    assert_eq!(lot.initial_quantity, dec("17"));
+    assert_eq!(lot.unit_cost, dec("9.6"));
+    assert_eq!(lot.fees, dec("0.82"));
 }
 
 #[test]

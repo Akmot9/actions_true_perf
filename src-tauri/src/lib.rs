@@ -19,7 +19,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::import_csv,
             commands::get_portfolio,
-            commands::refresh_quotes
+            commands::refresh_quotes,
+            commands::update_transaction,
+            commands::revert_transaction
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

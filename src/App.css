@@ -277,6 +277,31 @@ body {
   border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
 }
 
+.badge.edited {
+  color: var(--muted);
+  border: 1px dashed var(--muted);
+}
+
+.btn-icon {
+  font: inherit;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.btn-icon:hover {
+  color: var(--brass);
+  background: var(--panel-2);
+}
+
+.btn-icon:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 1px;
+}
+
 /* Strip signature : un carré par ordre d'achat, teinté par sa performance. */
 
 .orders-strip {
@@ -313,7 +338,7 @@ body {
 
 .lot-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.1fr) 100px 90px 90px 70px 100px 100px 100px minmax(150px, 1fr) 80px;
+  grid-template-columns: minmax(150px, 1.1fr) 100px 90px 90px 70px 100px 100px 100px minmax(150px, 1fr) 80px 28px;
   gap: 10px;
   align-items: center;
   padding: 6px 0;
@@ -408,6 +433,100 @@ body {
   font-size: 13px;
 }
 
+/* ——— Dialogue d'édition ——— */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 11, 16, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+}
+
+.dialog {
+  background: var(--panel);
+  border: 1px solid var(--brass);
+  border-radius: 8px;
+  padding: 20px 22px;
+  width: min(440px, 92vw);
+  display: grid;
+  gap: 14px;
+}
+
+.dialog h2 {
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+}
+
+.field label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.field input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.field input.num {
+  font-family: var(--font-num);
+  text-align: right;
+}
+
+.field input:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 1px;
+  border-color: var(--brass);
+}
+
+.field input::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+}
+
+.note {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dialog-error {
+  color: var(--loss);
+  font-size: 13px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.dialog-buttons {
+  display: flex;
+  gap: 8px;
+}
+
 /* ——— État vide ——— */
 
 .empty {
@@ -447,7 +566,7 @@ body {
   }
 
   .lot-row {
-    grid-template-columns: 1fr 90px 100px minmax(120px, 1fr);
+    grid-template-columns: minmax(120px, 1fr) 70px 80px 90px minmax(110px, 1fr) 28px;
   }
 
   .lot-row > :nth-child(2),

@@ -1,4 +1,4 @@
-import { createSignal, createResource, For, Show } from "solid-js";
+import { createSignal, createResource, For, Show, onCleanup, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ImportReport,
@@ -38,7 +38,156 @@ function DivergingBar(props: { pct: string | null }) {
   );
 }
 
-function LotRows(props: { position: PositionView }) {
+/** Formulaire d'édition de l'ordre sous-jacent à un lot. Les valeurs
+ *  d'origine sont archivées côté Rust et restaurables à tout moment. */
+function EditDialog(props: {
+  lot: LotView;
+  positionName: string;
+  onClose: (saved: boolean) => void;
+}) {
+  const [date_, setDate] = createSignal(props.lot.acquisition_date ?? "");
+  const [qty, setQty] = createSignal(props.lot.initial_quantity);
+  const [price, setPrice] = createSignal(props.lot.unit_cost);
+  const [fees, setFees] = createSignal(props.lot.fees);
+  const [error, setError] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal(false);
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") props.onClose(false);
+  };
+  onMount(() => document.addEventListener("keydown", onKey));
+  onCleanup(() => document.removeEventListener("keydown", onKey));
+
+  async function save(e: Event) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("update_transaction", {
+        id: props.lot.tx_id,
+        date: date_() || null,
+        quantity: qty(),
+        unitPrice: price(),
+        fees: fees(),
+      });
+      props.onClose(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revert() {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("revert_transaction", { id: props.lot.tx_id });
+      props.onClose(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div class="overlay" onClick={() => props.onClose(false)}>
+      <form
+        class="dialog"
+        role="dialog"
+        aria-label={`Modifier l'ordre ${props.positionName}`}
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={save}
+      >
+        <header>
+          <h2>Modifier l'ordre</h2>
+          <p class="muted">
+            {props.positionName} · {props.lot.origin_broker}
+            <Show when={props.lot.unreconciled}>
+              {" "}
+              · lot non rapproché (coût estimé au PRU courtier)
+            </Show>
+          </p>
+        </header>
+        <div class="field">
+          <label for="edit-date">Date d'achat</label>
+          <input
+            id="edit-date"
+            type="date"
+            value={date_()}
+            onInput={(e) => setDate(e.currentTarget.value)}
+          />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="edit-qty">Quantité</label>
+            <input
+              id="edit-qty"
+              class="num"
+              inputmode="decimal"
+              required
+              value={qty()}
+              onInput={(e) => setQty(e.currentTarget.value)}
+            />
+          </div>
+          <div class="field">
+            <label for="edit-price">Prix unitaire (€)</label>
+            <input
+              id="edit-price"
+              class="num"
+              inputmode="decimal"
+              required
+              value={price()}
+              onInput={(e) => setPrice(e.currentTarget.value)}
+            />
+          </div>
+          <div class="field">
+            <label for="edit-fees">Frais (€)</label>
+            <input
+              id="edit-fees"
+              class="num"
+              inputmode="decimal"
+              required
+              value={fees()}
+              onInput={(e) => setFees(e.currentTarget.value)}
+            />
+          </div>
+        </div>
+        <Show when={props.lot.remaining_quantity !== props.lot.initial_quantity}>
+          <p class="muted note">
+            La quantité modifiée est celle de l'ordre initial (
+            {num(props.lot.initial_quantity)}) ; les ventes déjà passées seront
+            recalculées.
+          </p>
+        </Show>
+        <Show when={error()}>
+          <p class="dialog-error">{error()}</p>
+        </Show>
+        <footer class="dialog-actions">
+          <Show when={props.lot.edited} fallback={<span />}>
+            <button type="button" class="btn ghost" disabled={busy()} onClick={revert}>
+              Restaurer l'original
+            </button>
+          </Show>
+          <span class="dialog-buttons">
+            <button type="button" class="btn" disabled={busy()} onClick={() => props.onClose(false)}>
+              Annuler
+            </button>
+            <button type="submit" class="btn primary" disabled={busy()}>
+              Enregistrer
+            </button>
+          </span>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function LotRows(props: {
+  position: PositionView;
+  onEdit: (lot: LotView) => void;
+}) {
   return (
     <div class="lots">
       <div class="lot-row lot-head" role="row">
@@ -52,6 +201,7 @@ function LotRows(props: { position: PositionView }) {
         <span class="num">P/L €</span>
         <span class="perf-col">P/L %</span>
         <span class="num">Détention</span>
+        <span />
       </div>
       <For each={props.position.lots}>
         {(lot) => (
@@ -61,6 +211,11 @@ function LotRows(props: { position: PositionView }) {
               <Show when={lot.unreconciled}>
                 <span class="badge warn" title="Titres reçus par transfert sans historique d'achat : coût estimé au PRU courtier. Importez l'historique d'origine pour rapprocher.">
                   non rapproché
+                </span>
+              </Show>
+              <Show when={lot.edited}>
+                <span class="badge edited" title="Ordre modifié manuellement — les valeurs importées restent restaurables.">
+                  modifié
                 </span>
               </Show>
             </span>
@@ -81,6 +236,19 @@ function LotRows(props: { position: PositionView }) {
               <span class={`num pct ${perfClass(lot.pnl_pct)}`}>{pct(lot.pnl_pct)}</span>
             </span>
             <span class="num muted">{holdingSince(lot.acquisition_date)}</span>
+            <span>
+              <Show when={lot.tx_id !== null}>
+                <button
+                  type="button"
+                  class="btn-icon"
+                  title="Modifier cet ordre"
+                  aria-label="Modifier cet ordre"
+                  onClick={() => props.onEdit(lot)}
+                >
+                  ✎
+                </button>
+              </Show>
+            </span>
           </div>
         )}
       </For>
@@ -88,7 +256,10 @@ function LotRows(props: { position: PositionView }) {
   );
 }
 
-function PositionRow(props: { position: PositionView }) {
+function PositionRow(props: {
+  position: PositionView;
+  onEdit: (lot: LotView, positionName: string) => void;
+}) {
   const p = props.position;
   const [open, setOpen] = createSignal(false);
   return (
@@ -126,7 +297,7 @@ function PositionRow(props: { position: PositionView }) {
         <span class={`num pct ${perfClass(p.pnl_pct)}`}>{pct(p.pnl_pct)}</span>
       </button>
       <Show when={open()}>
-        <LotRows position={p} />
+        <LotRows position={p} onEdit={(lot) => props.onEdit(lot, p.name)} />
         <Show when={Number(p.dividends) > 0 || Number(p.realized_pnl) !== 0}>
           <div class="position-foot">
             <Show when={Number(p.dividends) > 0}>
@@ -155,7 +326,13 @@ export default function App() {
   const [refreshing, setRefreshing] = createSignal(false);
   const [quoteErrors, setQuoteErrors] = createSignal<string[]>([]);
   const [showWarnings, setShowWarnings] = createSignal(false);
+  const [editing, setEditing] = createSignal<{ lot: LotView; name: string } | null>(null);
   let fileInput!: HTMLInputElement;
+
+  async function onEditClosed(saved: boolean) {
+    setEditing(null);
+    if (saved) await refetch();
+  }
 
   async function onFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -316,7 +493,12 @@ export default function App() {
                   <span class="num">P/L %</span>
                 </div>
                 <For each={p().positions}>
-                  {(position) => <PositionRow position={position} />}
+                  {(position) => (
+                    <PositionRow
+                      position={position}
+                      onEdit={(lot, name) => setEditing({ lot, name })}
+                    />
+                  )}
                 </For>
               </section>
             </Show>
@@ -342,6 +524,11 @@ export default function App() {
           <h2>Erreur</h2>
           <p>{String(portfolio.error)}</p>
         </section>
+      </Show>
+      <Show when={editing()}>
+        {(e) => (
+          <EditDialog lot={e().lot} positionName={e().name} onClose={onEditClosed} />
+        )}
       </Show>
     </main>
   );

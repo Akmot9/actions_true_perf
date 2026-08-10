@@ -9,6 +9,8 @@ export interface QuoteRow {
 
 export interface LotView {
   id: number;
+  tx_id: number | null;
+  edited: boolean;
   acquisition_date: string | null;
   origin_broker: string;
   account: string;

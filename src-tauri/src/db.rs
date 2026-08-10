@@ -6,8 +6,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
-const SCHEMA_VERSION: i32 = 1;
-
 const SCHEMA: &str = "
 CREATE TABLE accounts (
     id INTEGER PRIMARY KEY,
@@ -54,13 +52,28 @@ CREATE TABLE quotes (
 );
 ";
 
+/// Migrations appliquées séquentiellement ; `user_version` mémorise la
+/// dernière appliquée. Ne jamais modifier une migration publiée : en ajouter.
+const MIGRATIONS: &[&str] = &[
+    SCHEMA,
+    // v2 : édition manuelle d'une transaction. Les valeurs d'origine sont
+    // archivées dans original_json à la première édition (restaurables) ;
+    // l'empreinte de déduplication reste inchangée.
+    "ALTER TABLE transactions ADD COLUMN edited_at TEXT;
+     ALTER TABLE transactions ADD COLUMN original_json TEXT;",
+];
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version < SCHEMA_VERSION {
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    let mut version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    for (i, sql) in MIGRATIONS.iter().enumerate() {
+        let target = (i + 1) as i32;
+        if version < target {
+            conn.execute_batch(sql)?;
+            conn.pragma_update(None, "user_version", target)?;
+            version = target;
+        }
     }
     Ok(conn)
 }
@@ -219,6 +232,83 @@ pub fn load_quotes(conn: &Connection) -> rusqlite::Result<HashMap<String, QuoteR
             },
         ))
     })?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+/// Modifie une transaction sur demande explicite de l'utilisateur.
+/// Les valeurs d'origine sont archivées une seule fois (première édition) ;
+/// l'empreinte de déduplication n'est pas recalculée, si bien qu'un réimport
+/// du fichier source ne recrée pas l'ordre dans sa version d'origine.
+pub fn update_transaction(
+    conn: &Connection,
+    id: i64,
+    date: Option<NaiveDate>,
+    quantity: &Decimal,
+    unit_price: &Decimal,
+    fees: &Decimal,
+) -> rusqlite::Result<()> {
+    let (o_date, o_qty, o_price, o_fees, original_json) = conn.query_row(
+        "SELECT date, quantity, unit_price, fees, original_json FROM transactions WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        },
+    )?;
+    let original_json = original_json.unwrap_or_else(|| {
+        serde_json::json!({
+            "date": o_date, "quantity": o_qty, "unit_price": o_price, "fees": o_fees,
+        })
+        .to_string()
+    });
+    conn.execute(
+        "UPDATE transactions
+         SET date = ?2, quantity = ?3, unit_price = ?4, fees = ?5,
+             edited_at = datetime('now'), original_json = ?6
+         WHERE id = ?1",
+        params![
+            id,
+            date.map(|d| d.to_string()),
+            quantity.to_string(),
+            unit_price.to_string(),
+            fees.to_string(),
+            original_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Restaure les valeurs d'origine d'une transaction éditée.
+pub fn revert_transaction(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    let original_json: Option<String> = conn.query_row(
+        "SELECT original_json FROM transactions WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    let Some(json) = original_json else {
+        return Ok(()); // jamais éditée : rien à restaurer
+    };
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+    let s = |k: &str| v[k].as_str().map(str::to_string);
+    conn.execute(
+        "UPDATE transactions
+         SET date = ?2, quantity = ?3, unit_price = ?4, fees = COALESCE(?5, '0'),
+             edited_at = NULL, original_json = NULL
+         WHERE id = ?1",
+        params![id, s("date"), s("quantity"), s("unit_price"), s("fees")],
+    )?;
+    Ok(())
+}
+
+/// Identifiants des transactions modifiées manuellement.
+pub fn load_edited_ids(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM transactions WHERE edited_at IS NOT NULL")?;
+    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 

@@ -5,6 +5,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -92,6 +93,10 @@ pub fn do_import(conn: &rusqlite::Connection, file_name: &str, content: &str) ->
 #[derive(Serialize)]
 pub struct LotView {
     pub id: usize,
+    /// Transaction sous-jacente (achat, ou transfert pour un lot non
+    /// rapproché) : c'est elle qui est éditable.
+    pub tx_id: Option<i64>,
+    pub edited: bool,
     pub acquisition_date: Option<NaiveDate>,
     pub origin_broker: String,
     pub account: String,
@@ -154,6 +159,7 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
     let instruments = db::load_instruments(conn).map_err(|e| e.to_string())?;
     let quotes = db::load_quotes(conn).map_err(|e| e.to_string())?;
     let dividends = db::load_dividends(conn).map_err(|e| e.to_string())?;
+    let edited_ids = db::load_edited_ids(conn).map_err(|e| e.to_string())?;
 
     let out = replay(&txs);
 
@@ -199,6 +205,8 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
             }
             lot_views.push(LotView {
                 id: lot.id,
+                tx_id: lot.buy_tx_id,
+                edited: lot.buy_tx_id.is_some_and(|id| edited_ids.contains(&id)),
                 acquisition_date: lot.acquisition_date,
                 origin_broker: lot.origin_broker.clone(),
                 account: accounts.get(&lot.account_id).cloned().unwrap_or_default(),
@@ -256,6 +264,49 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
         total_realized_pnl,
         warnings: out.warnings,
     })
+}
+
+fn parse_dec(value: &str, label: &str) -> Result<Decimal, String> {
+    Decimal::from_str(value.trim().replace(',', ".").as_str())
+        .map_err(|_| format!("{label} invalide : « {value} »"))
+}
+
+#[tauri::command]
+pub fn update_transaction(
+    state: State<AppState>,
+    id: i64,
+    date: Option<String>,
+    quantity: String,
+    unit_price: String,
+    fees: String,
+) -> Result<(), String> {
+    let date = match date.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(d) => Some(
+            NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| format!("date invalide : « {d} »"))?,
+        ),
+    };
+    let quantity = parse_dec(&quantity, "quantité")?;
+    if quantity <= Decimal::ZERO {
+        return Err("la quantité doit être strictement positive".to_string());
+    }
+    let unit_price = parse_dec(&unit_price, "prix")?;
+    if unit_price < Decimal::ZERO {
+        return Err("le prix ne peut pas être négatif".to_string());
+    }
+    let fees = parse_dec(&fees, "frais")?;
+    if fees < Decimal::ZERO {
+        return Err("les frais ne peuvent pas être négatifs".to_string());
+    }
+
+    let conn = state.conn.lock().unwrap();
+    db::update_transaction(&conn, id, date, &quantity, &unit_price, &fees).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn revert_transaction(state: State<AppState>, id: i64) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    db::revert_transaction(&conn, id).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
