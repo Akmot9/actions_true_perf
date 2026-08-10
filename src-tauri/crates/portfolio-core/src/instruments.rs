@@ -12,12 +12,31 @@ const LABEL_ALIASES: &[(&str, &str, &str)] = &[
     ("TOTALENERGIES", "TTE.PA", "TotalEnergies"),
     ("VINCI", "DG.PA", "Vinci"),
     ("NEXITY", "NXI.PA", "Nexity"),
-    ("FDJ", "FDJ.PA", "FDJ United"),
-    ("FDJ UNITED", "FDJ.PA", "FDJ United"),
+    ("FDJ", "FDJU.PA", "FDJ United"),
+    ("FDJ UNITED", "FDJU.PA", "FDJ United"),
     ("DASSAULT SYSTEMES", "DSY.PA", "Dassault Systèmes"),
-    ("STMICROELECTRONICS", "STM.PA", "STMicroelectronics"),
-    ("STELLANTIS", "STLA.PA", "Stellantis"),
+    ("STMICROELECTRONICS", "STMPA.PA", "STMicroelectronics"),
+    ("STELLANTIS", "STLAP.PA", "Stellantis"),
 ];
+
+/// Symboles devenus obsolètes (renommage FDJ -> FDJ United, codes Paris de
+/// Yahoo différents des codes historiques) → symbole coté actuel.
+/// Appliqué à tout symbole entrant pour éviter des instruments en double.
+const SYMBOL_ALIASES: &[(&str, &str)] = &[
+    ("FDJ.PA", "FDJU.PA"),
+    ("STLA.PA", "STLAP.PA"),
+    ("STM.PA", "STMPA.PA"),
+];
+
+pub fn canonical_symbol(symbol: &str) -> String {
+    let up = symbol.trim().to_uppercase();
+    for (old, new) in SYMBOL_ALIASES {
+        if up == *old {
+            return (*new).to_string();
+        }
+    }
+    up
+}
 
 /// Résout un libellé courtier (ex: "DASSAULT SYSTEMES") vers un instrument.
 pub fn resolve_label(label: &str) -> InstrumentRef {
@@ -57,6 +76,16 @@ mod tests {
         // La ligne PF28 (changement de forme de détention) reste Air Liquide.
         let ai = resolve_label("AIR LIQUIDE PF28");
         assert_eq!(ai.symbol.as_deref(), Some("AI.PA"));
+    }
+
+    #[test]
+    fn obsolete_symbols_are_canonicalized() {
+        assert_eq!(canonical_symbol("FDJ.PA"), "FDJU.PA");
+        assert_eq!(canonical_symbol("STLA.PA"), "STLAP.PA");
+        assert_eq!(canonical_symbol("STM.PA"), "STMPA.PA");
+        assert_eq!(canonical_symbol("DSY.PA"), "DSY.PA");
+        // Libellé courtier et symbole obsolète convergent vers le même instrument.
+        assert_eq!(resolve_label("STELLANTIS").symbol.as_deref(), Some("STLAP.PA"));
     }
 
     #[test]

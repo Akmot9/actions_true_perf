@@ -61,6 +61,15 @@ const MIGRATIONS: &[&str] = &[
     // l'empreinte de déduplication reste inchangée.
     "ALTER TABLE transactions ADD COLUMN edited_at TEXT;
      ALTER TABLE transactions ADD COLUMN original_json TEXT;",
+    // v3 : canonicalisation des symboles obsolètes (FDJ renommée FDJ United,
+    // codes Paris Yahoo de Stellantis/STMicro différents des codes historiques).
+    "UPDATE OR IGNORE instruments SET symbol = 'FDJU.PA'  WHERE symbol = 'FDJ.PA';
+     UPDATE OR IGNORE instruments SET symbol = 'STLAP.PA' WHERE symbol = 'STLA.PA';
+     UPDATE OR IGNORE instruments SET symbol = 'STMPA.PA' WHERE symbol = 'STM.PA';
+     UPDATE OR IGNORE quotes SET symbol = 'FDJU.PA'  WHERE symbol = 'FDJ.PA';
+     UPDATE OR IGNORE quotes SET symbol = 'STLAP.PA' WHERE symbol = 'STLA.PA';
+     UPDATE OR IGNORE quotes SET symbol = 'STMPA.PA' WHERE symbol = 'STM.PA';
+     DELETE FROM quotes WHERE symbol IN ('FDJ.PA', 'STLA.PA', 'STM.PA');",
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {

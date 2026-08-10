@@ -334,6 +334,12 @@ export default function App() {
     if (saved) await refetch();
   }
 
+  // Rafraîchit les cours au lancement ; en cas d'échec (hors ligne), les
+  // derniers cours en cache restent affichés et l'erreur apparaît par symbole.
+  onMount(() => {
+    void onRefreshQuotes();
+  });
+
   async function onFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     setImportError(null);

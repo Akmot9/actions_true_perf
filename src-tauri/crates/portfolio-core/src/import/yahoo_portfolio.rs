@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 
 use super::{parse_decimal, FingerprintBuilder, ImportError, ParsedFile};
 use crate::domain::{ImportedTransaction, InstrumentRef, TxType};
-use crate::instruments::name_for_symbol;
+use crate::instruments::{canonical_symbol, name_for_symbol};
 
 pub const BROKER: &str = "BoursoBank";
 
@@ -43,10 +43,11 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
         let row = i + 2;
         let field = |c: Option<usize>| c.and_then(|c| record.get(c)).unwrap_or("").trim().to_string();
 
-        let symbol = field(c_symbol);
-        if symbol.is_empty() {
+        let raw_symbol = field(c_symbol);
+        if raw_symbol.is_empty() {
             continue;
         }
+        let symbol = canonical_symbol(&raw_symbol);
         let tx_type_s = field(c_type);
         if !tx_type_s.is_empty() && tx_type_s != "BUY" {
             warnings.push(format!("ligne {row}: type « {tx_type_s} » non géré pour {symbol}, ignoré"));
@@ -75,11 +76,13 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
         }
 
         let fees = parse_decimal(&field(c_commission)).unwrap_or(Decimal::ZERO);
+        // Empreinte calculée sur le symbole BRUT du fichier : la
+        // canonicalisation peut évoluer, les empreintes déjà en base non.
         let fingerprint = fp.fingerprint(&[
             BROKER,
             &trade_date_s,
             "BUY",
-            &symbol,
+            &raw_symbol,
             &field(c_qty),
             &field(c_price),
         ]);
@@ -136,5 +139,14 @@ DSY.PA,22.06,2026/08/10,10:11 CEST,-0.19,22.21,22.21,21.99,102349,20221223,33.4,
     fn current_prices_become_quotes() {
         let parsed = parse(SAMPLE).unwrap();
         assert_eq!(parsed.quotes, vec![("DSY.PA".to_string(), dec!(22.06))]);
+    }
+
+    #[test]
+    fn obsolete_symbols_canonicalized_at_import() {
+        let parsed = parse(SAMPLE).unwrap();
+        // La ligne FDJ.PA du fichier doit produire l'instrument FDJU.PA actuel.
+        let fdj = &parsed.transactions[0];
+        assert_eq!(fdj.instrument.as_ref().unwrap().symbol.as_deref(), Some("FDJU.PA"));
+        assert_eq!(fdj.instrument.as_ref().unwrap().name, "FDJ United");
     }
 }
