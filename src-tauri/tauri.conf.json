@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "actions_true_perf",
-        "width": 800,
-        "height": 600
+        "title": "Suivi des ordres",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 720,
+        "minHeight": 480
       }
     ],
     "security": {

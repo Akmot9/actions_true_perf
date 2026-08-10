@@ -1,0 +1,405 @@
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
+use serde::Serialize;
+
+use crate::domain::{EngineTx, TxType};
+
+/// Lot d'acquisition : un ordre d'achat = un lot, qui conserve son identité
+/// à travers ventes partielles, transferts de courtier et splits.
+#[derive(Debug, Clone, Serialize)]
+pub struct Lot {
+    /// Identifiant stable au sein d'un replay (ordre de création).
+    pub id: usize,
+    pub buy_tx_id: Option<i64>,
+    pub instrument_id: i64,
+    /// Compte détenant actuellement le lot (change lors d'un transfert).
+    pub account_id: i64,
+    /// Courtier chez qui l'ordre d'origine a été passé.
+    pub origin_broker: String,
+    pub acquisition_date: Option<NaiveDate>,
+    pub initial_quantity: Decimal,
+    pub remaining_quantity: Decimal,
+    /// Prix unitaire d'acquisition (hors frais).
+    pub unit_cost: Decimal,
+    /// Frais payés sur l'ordre entier, allouables au prorata des quantités.
+    pub fees: Decimal,
+    /// Lot créé pour couvrir un transfert entrant sans historique d'achat.
+    /// Résorbé automatiquement au prochain replay si l'historique est importé.
+    pub unreconciled: bool,
+}
+
+impl Lot {
+    /// Coût de revient (frais inclus) de la quantité restante.
+    pub fn invested_remaining(&self) -> Decimal {
+        self.remaining_quantity * self.unit_cost + self.fees_for(self.remaining_quantity)
+    }
+
+    fn fees_for(&self, qty: Decimal) -> Decimal {
+        if self.initial_quantity.is_zero() {
+            Decimal::ZERO
+        } else {
+            self.fees * qty / self.initial_quantity
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Disposal {
+    pub sell_tx_id: i64,
+    pub lot_id: usize,
+    pub quantity: Decimal,
+    pub cost_basis: Decimal,
+    pub proceeds: Decimal,
+    pub realized_pnl: Decimal,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ReplayOutput {
+    pub lots: Vec<Lot>,
+    pub disposals: Vec<Disposal>,
+    pub warnings: Vec<String>,
+}
+
+/// Priorité d'exécution pour les opérations d'une même journée, afin que le
+/// replay soit déterministe quel que soit l'ordre d'import des fichiers.
+fn type_priority(t: TxType) -> u8 {
+    match t {
+        TxType::Buy => 0,
+        TxType::Split => 1,
+        TxType::TransferOut => 2,
+        TxType::TransferIn => 3,
+        TxType::Sell => 4,
+        _ => 5,
+    }
+}
+
+/// Rejoue l'intégralité des transactions et reconstruit l'état des lots.
+/// Les transactions sont la source de vérité ; cette fonction est pure et
+/// déterministe (mêmes transactions => mêmes lots).
+pub fn replay(txs: &[EngineTx]) -> ReplayOutput {
+    let mut txs: Vec<&EngineTx> = txs.iter().collect();
+    // Les dates inconnues (ex: achats anciens sans date) passent en premier :
+    // elles sont forcément antérieures à l'historique daté.
+    txs.sort_by_key(|t| (t.date.unwrap_or(NaiveDate::MIN), type_priority(t.tx_type), t.id));
+
+    let mut out = ReplayOutput::default();
+
+    for tx in txs {
+        match tx.tx_type {
+            TxType::Buy => apply_buy(&mut out, tx),
+            TxType::Sell => apply_sell(&mut out, tx),
+            TxType::TransferIn => apply_transfer_in(&mut out, tx),
+            TxType::Split => apply_split(&mut out, tx),
+            // TRANSFER_OUT est administratif : c'est le TRANSFER_IN apparié
+            // qui déplace les lots. Dividendes/espèces/frais n'affectent pas
+            // les lots.
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn apply_buy(out: &mut ReplayOutput, tx: &EngineTx) {
+    let (Some(instrument_id), Some(qty), Some(price)) = (tx.instrument_id, tx.quantity, tx.unit_price) else {
+        out.warnings.push(format!("BUY tx#{} incomplet (instrument/quantité/prix manquant), ignoré", tx.id));
+        return;
+    };
+    let id = out.lots.len();
+    out.lots.push(Lot {
+        id,
+        buy_tx_id: Some(tx.id),
+        instrument_id,
+        account_id: tx.account_id,
+        origin_broker: tx.broker.clone(),
+        acquisition_date: tx.date,
+        initial_quantity: qty,
+        remaining_quantity: qty,
+        unit_cost: price,
+        fees: tx.fees,
+        unreconciled: false,
+    });
+}
+
+/// Indices des lots ouverts pour un instrument, en ordre FIFO
+/// (dates inconnues d'abord, puis date d'acquisition, puis ordre de création).
+fn open_lots_fifo(lots: &[Lot], instrument_id: i64, account_id: Option<i64>) -> Vec<usize> {
+    let mut idx: Vec<usize> = lots
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.instrument_id == instrument_id
+                && !l.remaining_quantity.is_zero()
+                && account_id.map_or(true, |a| l.account_id == a)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    idx.sort_by_key(|&i| (lots[i].acquisition_date.unwrap_or(NaiveDate::MIN), lots[i].id));
+    idx
+}
+
+fn apply_sell(out: &mut ReplayOutput, tx: &EngineTx) {
+    let (Some(instrument_id), Some(qty)) = (tx.instrument_id, tx.quantity) else {
+        out.warnings.push(format!("SELL tx#{} incomplet, ignoré", tx.id));
+        return;
+    };
+    let price = tx.unit_price.unwrap_or(Decimal::ZERO);
+    let mut to_sell = qty;
+
+    for i in open_lots_fifo(&out.lots, instrument_id, Some(tx.account_id)) {
+        if to_sell.is_zero() {
+            break;
+        }
+        let lot = &mut out.lots[i];
+        let take = to_sell.min(lot.remaining_quantity);
+        let cost_basis = take * lot.unit_cost + lot.fees_for(take);
+        let proceeds = take * price - if qty.is_zero() { Decimal::ZERO } else { tx.fees * take / qty };
+        lot.remaining_quantity -= take;
+        to_sell -= take;
+        out.disposals.push(Disposal {
+            sell_tx_id: tx.id,
+            lot_id: lot.id,
+            quantity: take,
+            cost_basis,
+            proceeds,
+            realized_pnl: proceeds - cost_basis,
+        });
+    }
+
+    if !to_sell.is_zero() {
+        out.warnings.push(format!(
+            "Vente tx#{} : {} titres vendus sans lot disponible (instrument #{})",
+            tx.id, to_sell, instrument_id
+        ));
+    }
+}
+
+/// Un transfert entrant déplace les lots historiques existants (autres comptes)
+/// vers le compte cible, sans toucher date/coût/performance. Si l'historique ne
+/// couvre pas la quantité transférée, le reliquat devient un lot `unreconciled`
+/// au PRU communiqué par le courtier — remplacé dès que l'historique manquant
+/// est importé (nouveau replay).
+fn apply_transfer_in(out: &mut ReplayOutput, tx: &EngineTx) {
+    let (Some(instrument_id), Some(qty)) = (tx.instrument_id, tx.quantity) else {
+        out.warnings.push(format!("TRANSFER_IN tx#{} incomplet, ignoré", tx.id));
+        return;
+    };
+    let mut to_move = qty;
+
+    for i in open_lots_fifo(&out.lots, instrument_id, None) {
+        if to_move.is_zero() {
+            break;
+        }
+        let lot = &mut out.lots[i];
+        if lot.account_id == tx.account_id {
+            continue;
+        }
+        if lot.remaining_quantity <= to_move {
+            // Le lot entier change de compte, identité préservée.
+            to_move -= lot.remaining_quantity;
+            lot.account_id = tx.account_id;
+        } else {
+            // Transfert partiel : le lot est scindé, chaque moitié garde
+            // date, coût unitaire et frais au prorata.
+            let moved = to_move;
+            let fees_moved = lot.fees_for(moved);
+            lot.remaining_quantity -= moved;
+            lot.initial_quantity -= moved;
+            lot.fees -= fees_moved;
+            let (buy_tx_id, date, unit_cost, broker, unreconciled) = (
+                lot.buy_tx_id,
+                lot.acquisition_date,
+                lot.unit_cost,
+                lot.origin_broker.clone(),
+                lot.unreconciled,
+            );
+            let id = out.lots.len();
+            out.lots.push(Lot {
+                id,
+                buy_tx_id,
+                instrument_id,
+                account_id: tx.account_id,
+                origin_broker: broker,
+                acquisition_date: date,
+                initial_quantity: moved,
+                remaining_quantity: moved,
+                unit_cost,
+                fees: fees_moved,
+                unreconciled,
+            });
+            to_move = Decimal::ZERO;
+        }
+    }
+
+    if !to_move.is_zero() {
+        out.warnings.push(format!(
+            "Transfert tx#{} : {} titres reçus sans historique d'achat (instrument #{}) — lot au PRU courtier créé",
+            tx.id, to_move, instrument_id
+        ));
+        let id = out.lots.len();
+        out.lots.push(Lot {
+            id,
+            buy_tx_id: Some(tx.id),
+            instrument_id,
+            account_id: tx.account_id,
+            origin_broker: "inconnu".to_string(),
+            acquisition_date: tx.date,
+            initial_quantity: to_move,
+            remaining_quantity: to_move,
+            unit_cost: tx.unit_price.unwrap_or(Decimal::ZERO),
+            fees: Decimal::ZERO,
+            unreconciled: true,
+        });
+    }
+}
+
+/// Split `r:1` : la quantité du champ `quantity` porte le ratio.
+/// Quantités multipliées, coût unitaire divisé, coût total du lot invariant.
+fn apply_split(out: &mut ReplayOutput, tx: &EngineTx) {
+    let (Some(instrument_id), Some(ratio)) = (tx.instrument_id, tx.quantity) else {
+        out.warnings.push(format!("SPLIT tx#{} sans ratio, ignoré", tx.id));
+        return;
+    };
+    if ratio.is_zero() {
+        out.warnings.push(format!("SPLIT tx#{} avec ratio nul, ignoré", tx.id));
+        return;
+    }
+    for lot in out.lots.iter_mut().filter(|l| l.instrument_id == instrument_id) {
+        lot.initial_quantity *= ratio;
+        lot.remaining_quantity *= ratio;
+        lot.unit_cost /= ratio;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn tx(id: i64, account: i64, date: &str, t: TxType, qty: &str, price: &str) -> EngineTx {
+        EngineTx {
+            id,
+            account_id: account,
+            broker: if account == 1 { "BoursoBank".into() } else { "Bourse Direct".into() },
+            date: Some(d(date)),
+            tx_type: t,
+            instrument_id: Some(10),
+            quantity: Some(qty.parse().unwrap()),
+            unit_price: Some(price.parse().unwrap()),
+            fees: Decimal::ZERO,
+        }
+    }
+
+    #[test]
+    fn multiple_buys_create_distinct_lots() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Buy, "10", "20"),
+            tx(2, 1, "2024-02-10", TxType::Buy, "10", "30"),
+        ]);
+        assert_eq!(out.lots.len(), 2);
+        assert_eq!(out.lots[0].unit_cost, dec!(20));
+        assert_eq!(out.lots[1].unit_cost, dec!(30));
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn partial_sell_consumes_fifo() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Buy, "10", "20"),
+            tx(2, 1, "2024-02-10", TxType::Buy, "10", "30"),
+            tx(3, 1, "2024-03-10", TxType::Sell, "15", "40"),
+        ]);
+        assert_eq!(out.lots[0].remaining_quantity, dec!(0));
+        assert_eq!(out.lots[1].remaining_quantity, dec!(5));
+        assert_eq!(out.disposals.len(), 2);
+        // Lot 1 : 10 vendues, PnL = 10*(40-20) = 200
+        assert_eq!(out.disposals[0].realized_pnl, dec!(200));
+        // Lot 2 : 5 vendues, PnL = 5*(40-30) = 50
+        assert_eq!(out.disposals[1].realized_pnl, dec!(50));
+    }
+
+    #[test]
+    fn transfer_preserves_lot_identity() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Buy, "10", "20"),
+            tx(2, 2, "2025-03-04", TxType::TransferIn, "10", "22"),
+        ]);
+        assert_eq!(out.lots.len(), 1);
+        let lot = &out.lots[0];
+        assert_eq!(lot.account_id, 2); // compte actuel = Bourse Direct
+        assert_eq!(lot.acquisition_date, Some(d("2024-01-10"))); // date inchangée
+        assert_eq!(lot.unit_cost, dec!(20)); // coût inchangé (pas le PRU courtier)
+        assert_eq!(lot.origin_broker, "BoursoBank");
+        assert!(!lot.unreconciled);
+    }
+
+    #[test]
+    fn transfer_without_history_creates_unreconciled_lot() {
+        // 22 Nexity connues, 141 transférées => 119 au PRU courtier.
+        let out = replay(&[
+            tx(1, 1, "2023-06-28", TxType::Buy, "22", "18.39"),
+            tx(2, 2, "2025-03-04", TxType::TransferIn, "141", "12.25773"),
+        ]);
+        assert_eq!(out.lots.len(), 2);
+        assert_eq!(out.lots[0].remaining_quantity, dec!(22));
+        assert_eq!(out.lots[0].account_id, 2);
+        assert!(!out.lots[0].unreconciled);
+        assert_eq!(out.lots[1].remaining_quantity, dec!(119));
+        assert!(out.lots[1].unreconciled);
+        assert_eq!(out.lots[1].unit_cost, dec!(12.25773));
+        assert_eq!(out.warnings.len(), 1);
+    }
+
+    #[test]
+    fn late_history_import_resolves_unreconciled_on_next_replay() {
+        // Même scénario, mais l'historique complet arrive plus tard (id plus
+        // grand) : le tri par date le replace avant le transfert et le lot
+        // unreconciled disparaît.
+        let out = replay(&[
+            tx(5, 2, "2025-03-04", TxType::TransferIn, "141", "12.25773"),
+            tx(6, 1, "2023-06-28", TxType::Buy, "22", "18.39"),
+            tx(7, 1, "2022-09-05", TxType::Buy, "119", "22.22"),
+        ]);
+        assert_eq!(out.lots.len(), 2);
+        assert!(out.lots.iter().all(|l| !l.unreconciled));
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn split_preserves_total_cost() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Buy, "10", "100"),
+            tx(2, 1, "2024-06-10", TxType::Split, "2", "0"),
+        ]);
+        let lot = &out.lots[0];
+        assert_eq!(lot.remaining_quantity, dec!(20));
+        assert_eq!(lot.unit_cost, dec!(50));
+        assert_eq!(lot.invested_remaining(), dec!(1000));
+    }
+
+    #[test]
+    fn oversell_is_reported_not_silently_fixed() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Buy, "10", "20"),
+            tx(2, 1, "2024-02-10", TxType::Sell, "12", "25"),
+        ]);
+        assert_eq!(out.lots[0].remaining_quantity, dec!(0));
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("sans lot disponible"));
+    }
+
+    #[test]
+    fn fees_allocated_pro_rata_on_partial_sell() {
+        let mut buy = tx(1, 1, "2024-01-10", TxType::Buy, "10", "20");
+        buy.fees = dec!(2);
+        let out = replay(&[buy, tx(2, 1, "2024-02-10", TxType::Sell, "5", "30")]);
+        // Coût de la portion vendue : 5*20 + 2*5/10 = 101
+        assert_eq!(out.disposals[0].cost_basis, dec!(101));
+        // Coût de la portion restante : 5*20 + 1 = 101
+        assert_eq!(out.lots[0].invested_remaining(), dec!(101));
+    }
+}

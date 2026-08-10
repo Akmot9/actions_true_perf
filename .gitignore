@@ -1,2 +1,7 @@
 node_modules
 dist
+
+# Données personnelles : relevés réels utilisés pour les imports.
+# Les garder hors du dépôt ; le test e2e les saute s'ils sont absents.
+portfolio.csv
+Releve_compte_*.csv
