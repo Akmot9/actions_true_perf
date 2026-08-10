@@ -56,6 +56,9 @@ pub struct InstrumentRef {
     /// Symbole de marché (format Yahoo, ex: `DSY.PA`). None si le libellé
     /// courtier n'a pas pu être rapproché d'un instrument connu.
     pub symbol: Option<String>,
+    /// ISIN quand le courtier le fournit (Trade Republic notamment) ;
+    /// c'est la clé de rapprochement la plus fiable entre courtiers.
+    pub isin: Option<String>,
     pub name: String,
 }
 

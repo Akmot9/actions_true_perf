@@ -5,3 +5,4 @@ dist
 # Les garder hors du dépôt ; le test e2e les saute s'ils sont absents.
 portfolio.csv
 Releve_compte_*.csv
+transactions_*.csv

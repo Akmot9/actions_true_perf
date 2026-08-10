@@ -91,7 +91,11 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
             broker: BROKER.to_string(),
             date,
             tx_type: TxType::Buy,
-            instrument: Some(InstrumentRef { symbol: Some(symbol.clone()), name: name_for_symbol(&symbol) }),
+            instrument: Some(InstrumentRef {
+                symbol: Some(symbol.clone()),
+                isin: None,
+                name: name_for_symbol(&symbol),
+            }),
             quantity: Some(quantity),
             unit_price: Some(unit_price),
             fees,
@@ -102,7 +106,13 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
         });
     }
 
-    Ok(ParsedFile { broker: BROKER.to_string(), transactions: txs, warnings, quotes })
+    Ok(ParsedFile {
+        broker: BROKER.to_string(),
+        account_type: "PEA".to_string(),
+        transactions: txs,
+        warnings,
+        quotes,
+    })
 }
 
 #[cfg(test)]

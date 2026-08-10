@@ -73,7 +73,13 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
         });
     }
 
-    Ok(ParsedFile { broker: BROKER.to_string(), transactions: txs, warnings, quotes: Vec::new() })
+    Ok(ParsedFile {
+        broker: BROKER.to_string(),
+        account_type: "PEA".to_string(),
+        transactions: txs,
+        warnings,
+        quotes: Vec::new(),
+    })
 }
 
 #[allow(clippy::type_complexity)]

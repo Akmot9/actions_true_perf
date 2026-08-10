@@ -38,7 +38,8 @@ pub fn do_import(conn: &rusqlite::Connection, file_name: &str, content: &str) ->
     let parsed = parse_any(content).map_err(|e| e.to_string())?;
     let file_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
 
-    let account_id = db::get_or_create_account(conn, &parsed.broker).map_err(|e| e.to_string())?;
+    let account_id =
+        db::get_or_create_account(conn, &parsed.broker, &parsed.account_type).map_err(|e| e.to_string())?;
     let (file_id, file_already_imported) =
         db::record_import_file(conn, file_name, &file_hash, &parsed.broker, content).map_err(|e| e.to_string())?;
 
@@ -47,9 +48,10 @@ pub fn do_import(conn: &rusqlite::Connection, file_name: &str, content: &str) ->
     let mut by_type: HashMap<&'static str, usize> = HashMap::new();
     for t in &parsed.transactions {
         let instrument_id = match &t.instrument {
-            Some(i) => {
-                Some(db::get_or_create_instrument(conn, i.symbol.as_deref(), &i.name).map_err(|e| e.to_string())?)
-            }
+            Some(i) => Some(
+                db::get_or_create_instrument(conn, i.symbol.as_deref(), i.isin.as_deref(), &i.name)
+                    .map_err(|e| e.to_string())?,
+            ),
             None => None,
         };
         if db::insert_transaction(conn, account_id, instrument_id, file_id, t).map_err(|e| e.to_string())? {

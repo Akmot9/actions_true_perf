@@ -70,6 +70,9 @@ const MIGRATIONS: &[&str] = &[
      UPDATE OR IGNORE quotes SET symbol = 'STLAP.PA' WHERE symbol = 'STLA.PA';
      UPDATE OR IGNORE quotes SET symbol = 'STMPA.PA' WHERE symbol = 'STM.PA';
      DELETE FROM quotes WHERE symbol IN ('FDJ.PA', 'STLA.PA', 'STM.PA');",
+    // v4 : ISIN sur les instruments — clé de rapprochement la plus fiable
+    // entre courtiers (Trade Republic identifie les titres par ISIN).
+    "ALTER TABLE instruments ADD COLUMN isin TEXT;",
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -87,38 +90,60 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-pub fn get_or_create_account(conn: &Connection, broker: &str) -> rusqlite::Result<i64> {
+pub fn get_or_create_account(conn: &Connection, broker: &str, account_type: &str) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO accounts (name, broker) VALUES (?1, ?2) ON CONFLICT(broker) DO NOTHING",
-        params![format!("PEA {broker}"), broker],
+        "INSERT INTO accounts (name, broker, account_type) VALUES (?1, ?2, ?3)
+         ON CONFLICT(broker) DO NOTHING",
+        params![format!("{account_type} {broker}"), broker, account_type],
     )?;
     conn.query_row("SELECT id FROM accounts WHERE broker = ?1", params![broker], |r| r.get(0))
 }
 
-/// Retrouve un instrument par symbole, sinon par nom (instruments sans
-/// symbole connus), sinon le crée.
+/// Retrouve un instrument par ISIN, sinon par symbole, sinon par nom,
+/// sinon le crée. Complète ISIN/symbole manquants au passage, si bien que
+/// les imports successifs de courtiers différents convergent vers le même
+/// instrument (ex: « AIR LIQUIDE » Bourse Direct + FR0000120073 Trade
+/// Republic + AI.PA portfolio.csv = une seule position).
 pub fn get_or_create_instrument(
     conn: &Connection,
     symbol: Option<&str>,
+    isin: Option<&str>,
     name: &str,
 ) -> rusqlite::Result<i64> {
+    if let Some(isin) = isin {
+        if let Ok(id) = conn.query_row("SELECT id FROM instruments WHERE isin = ?1", params![isin], |r| r.get(0)) {
+            if let Some(sym) = symbol {
+                conn.execute("UPDATE instruments SET symbol = ?1 WHERE id = ?2 AND symbol IS NULL", params![sym, id])?;
+            }
+            return Ok(id);
+        }
+    }
     if let Some(sym) = symbol {
         if let Ok(id) = conn.query_row("SELECT id FROM instruments WHERE symbol = ?1", params![sym], |r| r.get(0)) {
+            if let Some(isin) = isin {
+                conn.execute("UPDATE instruments SET isin = ?1 WHERE id = ?2 AND isin IS NULL", params![isin, id])?;
+            }
             return Ok(id);
         }
         // Un import précédent a pu créer l'instrument par son nom seul.
         if let Ok(id) = conn.query_row("SELECT id FROM instruments WHERE symbol IS NULL AND name = ?1", params![name], |r| r.get(0))
         {
-            conn.execute("UPDATE instruments SET symbol = ?1 WHERE id = ?2", params![sym, id])?;
+            conn.execute("UPDATE instruments SET symbol = ?1, isin = COALESCE(isin, ?2) WHERE id = ?3", params![sym, isin, id])?;
             return Ok(id);
         }
-        conn.execute("INSERT INTO instruments (symbol, name) VALUES (?1, ?2)", params![sym, name])?;
-        return Ok(conn.last_insert_rowid());
     }
-    if let Ok(id) = conn.query_row("SELECT id FROM instruments WHERE name = ?1", params![name], |r| r.get(0)) {
-        return Ok(id);
+    if symbol.is_none() {
+        if let Ok(id) = conn.query_row("SELECT id FROM instruments WHERE name = ?1", params![name], |r| r.get(0)) {
+            if let Some(isin) = isin {
+                conn.execute("UPDATE instruments SET isin = ?1 WHERE id = ?2 AND isin IS NULL", params![isin, id])?;
+            }
+            return Ok(id);
+        }
     }
-    conn.execute("INSERT INTO instruments (name) VALUES (?1)", params![name])?;
+    conn.execute(
+        "INSERT INTO instruments (symbol, isin, name) VALUES (?1, ?2, ?3)",
+        params![symbol, isin, name],
+    )?;
     Ok(conn.last_insert_rowid())
 }
 

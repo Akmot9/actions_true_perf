@@ -28,6 +28,55 @@ fn dec(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
 }
 
+fn read_by_prefix(prefix: &str) -> Option<String> {
+    std::fs::read_dir(repo_root())
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        .and_then(|e| std::fs::read_to_string(e.path()).ok())
+}
+
+#[test]
+fn trade_republic_import_merges_air_liquide_across_brokers() {
+    let (Some(tr), Some((yahoo, bd))) = (read_by_prefix("transactions_"), read_samples()) else {
+        eprintln!("fichiers d'exemple absents, test sauté");
+        return;
+    };
+    let conn = db::open(Path::new(":memory:")).unwrap();
+    do_import(&conn, "releve_bd.csv", &bd).unwrap();
+    do_import(&conn, "portfolio.csv", &yahoo).unwrap();
+    let r = do_import(&conn, "transactions.csv", &tr).unwrap();
+    assert!(r.inserted > 800, "export TR complet importé ({} lignes)", r.inserted);
+
+    // Réimport : zéro doublon grâce aux transaction_id.
+    let r2 = do_import(&conn, "transactions.csv", &tr).unwrap();
+    assert_eq!(r2.inserted, 0);
+
+    let p = build_portfolio(&conn).unwrap();
+
+    // Une SEULE position Air Liquide, fusion des trois sources : lots PEA
+    // (portfolio.csv, transférés chez Bourse Direct) + plan d'épargne et
+    // attribution gratuite Trade Republic.
+    let ai: Vec<_> = p.positions.iter().filter(|p| p.symbol.as_deref() == Some("AI.PA")).collect();
+    assert_eq!(ai.len(), 1);
+    let ai = ai[0];
+    assert!(ai.lots.iter().any(|l| l.origin_broker == "BoursoBank"));
+    assert!(ai.lots.iter().any(|l| l.origin_broker == "Trade Republic"));
+    // 3 actions PEA + ~2.44 de plan d'épargne + 0.12 d'attribution gratuite.
+    assert!(
+        ai.quantity > dec("5") && ai.quantity < dec("6"),
+        "quantité Air Liquide fusionnée : {}",
+        ai.quantity
+    );
+
+    // Les cryptos ont des paires euro et les ventes ont réduit les lots.
+    let btc = p.positions.iter().find(|p| p.symbol.as_deref() == Some("BTC-EUR"));
+    assert!(btc.is_some(), "position Bitcoin présente");
+
+    // Le fonds private equity existe sans cotation (pas de symbole Yahoo).
+    assert!(p.positions.iter().any(|q| q.name.contains("Private Equity") && q.quote.is_none()));
+}
+
 #[test]
 fn edit_order_archives_original_and_survives_reimport() {
     let csv = "\

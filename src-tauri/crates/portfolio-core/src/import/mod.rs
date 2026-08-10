@@ -1,4 +1,5 @@
 pub mod bourse_direct;
+pub mod trade_republic;
 pub mod yahoo_portfolio;
 
 use rust_decimal::Decimal;
@@ -12,6 +13,8 @@ use crate::domain::ImportedTransaction;
 #[derive(Debug, Serialize)]
 pub struct ParsedFile {
     pub broker: String,
+    /// Type du compte chez ce courtier (PEA, CTO…).
+    pub account_type: String,
     pub transactions: Vec<ImportedTransaction>,
     pub warnings: Vec<String>,
     /// Cours actuels trouvés dans le fichier (portfolio.csv en contient),
@@ -34,6 +37,8 @@ pub fn parse_any(content: &str) -> Result<ParsedFile, ImportError> {
 
     if bourse_direct::detect(&headers) {
         bourse_direct::parse(content)
+    } else if trade_republic::detect(&headers) {
+        trade_republic::parse(content)
     } else if yahoo_portfolio::detect(&headers) {
         yahoo_portfolio::parse(content)
     } else {
