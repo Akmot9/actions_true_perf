@@ -79,12 +79,23 @@ function ManualTransactionDialog(props: {
   onMount(() => document.addEventListener("keydown", onKey));
   onCleanup(() => document.removeEventListener("keydown", onKey));
 
+  // Symbole issu de l'auto-complétion, à distinguer d'une saisie de
+  // l'utilisateur : si le nom ne correspond plus, il doit être effacé pour ne
+  // pas rattacher silencieusement l'opération au mauvais instrument.
+  const [autoSymbol, setAutoSymbol] = createSignal<string | null>(null);
+
   function onInstrumentInput(value: string) {
     setInstrumentName(value);
     const match = props.instruments.find(
       (instrument) => instrument.name.toLocaleLowerCase() === value.trim().toLocaleLowerCase(),
     );
-    if (match?.symbol) setSymbol(match.symbol);
+    if (match?.symbol) {
+      setSymbol(match.symbol);
+      setAutoSymbol(match.symbol);
+    } else if (autoSymbol() !== null && symbol() === autoSymbol()) {
+      setSymbol("");
+      setAutoSymbol(null);
+    }
   }
 
   async function save(e: Event) {
@@ -117,12 +128,17 @@ function ManualTransactionDialog(props: {
     }
   }
 
+  // Confirmation en deux clics dans la page : window.confirm n'est pas
+  // implémenté par le WebView (WKWebView sur iOS/macOS) et rendrait la
+  // suppression impossible.
+  const [confirmDelete, setConfirmDelete] = createSignal(false);
+
   async function remove() {
     if (!existing) return;
-    const confirmed = window.confirm(
-      `Supprimer la ligne manuelle « ${operationLabels[existing.operation]} ${existing.instrument_name} » ?`,
-    );
-    if (!confirmed) return;
+    if (!confirmDelete()) {
+      setConfirmDelete(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -157,10 +173,9 @@ function ManualTransactionDialog(props: {
               value={operation()}
               onChange={(e) => setOperation(e.currentTarget.value as ManualOperation)}
             >
-              <option value="BUY">Achat</option>
-              <option value="SELL">Vente</option>
-              <option value="DIVIDEND">Dividende</option>
-              <option value="STAKING">Staking</option>
+              <For each={Object.entries(operationLabels)}>
+                {([value, label]) => <option value={value}>{label}</option>}
+              </For>
             </select>
           </div>
           <div class="field">
@@ -300,8 +315,14 @@ function ManualTransactionDialog(props: {
         </Show>
         <footer class="dialog-actions">
           <Show when={existing} fallback={<span />}>
-            <button type="button" class="btn danger ghost" disabled={busy()} onClick={remove}>
-              Supprimer
+            <button
+              type="button"
+              class="btn danger ghost"
+              classList={{ arming: confirmDelete() }}
+              disabled={busy()}
+              onClick={remove}
+            >
+              {confirmDelete() ? "Confirmer la suppression ?" : "Supprimer"}
             </button>
           </Show>
           <span class="dialog-buttons">
@@ -522,10 +543,125 @@ function ManualTransactions(props: {
   );
 }
 
+function LotRow(props: {
+  lot: LotView;
+  child?: boolean;
+  expanded?: boolean;
+  onToggle?: () => void;
+  onEdit: (lot: LotView) => void;
+}) {
+  const lot = () => props.lot;
+  return (
+    <div class="lot-row" classList={{ "lot-child": props.child }} role="row">
+      <span class="lot-date">
+        <Show
+          when={lot().income_events > 0 && !props.child}
+          fallback={date(lot().acquisition_date)}
+        >
+          <Show
+            when={lot().children.length > 0}
+            fallback={
+              <>
+                <span>Staking</span>
+                <span class="muted">{date(lot().acquisition_date)}</span>
+              </>
+            }
+          >
+            <button
+              type="button"
+              class="btn-toggle"
+              aria-expanded={props.expanded}
+              title="Afficher chaque versement"
+              onClick={props.onToggle}
+            >
+              <span aria-hidden="true">{props.expanded ? "▾" : "▸"}</span> Staking
+            </button>
+            <span class="badge income">
+              {lot().income_events} versement{lot().income_events > 1 ? "s" : ""}
+            </span>
+            <span class="muted">depuis {date(lot().acquisition_date)}</span>
+          </Show>
+        </Show>
+        <Show when={lot().unreconciled}>
+          <span class="badge warn" title="Titres reçus par transfert sans historique d'achat : coût estimé au PRU courtier. Importez l'historique d'origine pour rapprocher.">
+            non rapproché
+          </span>
+        </Show>
+        <Show when={lot().edited}>
+          <span class="badge edited" title="Ordre modifié manuellement — les valeurs importées restent restaurables.">
+            modifié
+          </span>
+        </Show>
+        <Show when={lot().manual}>
+          <span class="badge manual" title="Opération ajoutée manuellement.">
+            manuel
+          </span>
+        </Show>
+      </span>
+      <span class="lot-broker">{lot().origin_broker}</span>
+      <span class="num lot-stat lot-quantity" data-label="Quantité">
+        {num(lot().remaining_quantity)}
+        <Show when={lot().remaining_quantity !== lot().initial_quantity}>
+          <span class="muted"> / {num(lot().initial_quantity)}</span>
+        </Show>
+      </span>
+      <span class="num lot-stat lot-price" data-label="Prix de référence">
+        {eur(lot().unit_cost)}
+      </span>
+      <span class="num muted lot-stat lot-fees" data-label="Frais">
+        {Number(lot().fees) ? eur(lot().fees) : "—"}
+      </span>
+      <span class="num lot-stat lot-invested" data-label="Investi">
+        {eur(lot().invested)}
+      </span>
+      <span class="num lot-stat lot-value" data-label="Valeur">
+        {eur(lot().market_value)}
+      </span>
+      <span
+        class={`num lot-stat lot-pnl ${perfClass(lot().pnl)}`}
+        data-label="P/L latent"
+      >
+        {lot().pnl ? eur(lot().pnl) : "—"}
+      </span>
+      <span class="perf-col lot-stat lot-performance" data-label="Performance">
+        <DivergingBar pct={lot().pnl_pct} />
+        <span class={`num pct ${perfClass(lot().pnl_pct)}`}>{pct(lot().pnl_pct)}</span>
+      </span>
+      <span class="num muted lot-stat lot-holding" data-label="Détention">
+        {holdingSince(lot().acquisition_date)}
+      </span>
+      <span class="lot-actions">
+        <Show when={lot().tx_id !== null}>
+          <button
+            type="button"
+            class="btn-icon"
+            title="Modifier cet ordre"
+            aria-label="Modifier cet ordre"
+            onClick={() => props.onEdit(lot())}
+          >
+            ✎
+          </button>
+        </Show>
+      </span>
+    </div>
+  );
+}
+
 function LotRows(props: {
   position: PositionView;
   onEdit: (lot: LotView) => void;
 }) {
+  const [expanded, setExpanded] = createSignal<Set<number>>(new Set());
+  const toggle = (id: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   return (
     <div class="lots">
       <div class="lot-row lot-head" role="row">
@@ -543,80 +679,19 @@ function LotRows(props: {
       </div>
       <For each={props.position.lots}>
         {(lot) => (
-          <div class="lot-row" role="row">
-            <span class="lot-date">
-              <Show
-                when={lot.income_events > 0}
-                fallback={date(lot.acquisition_date)}
-              >
-                <span>Staking</span>
-                <span class="badge income">
-                  {lot.income_events} versement{lot.income_events > 1 ? "s" : ""}
-                </span>
-                <span class="muted">depuis {date(lot.acquisition_date)}</span>
-              </Show>
-              <Show when={lot.unreconciled}>
-                <span class="badge warn" title="Titres reçus par transfert sans historique d'achat : coût estimé au PRU courtier. Importez l'historique d'origine pour rapprocher.">
-                  non rapproché
-                </span>
-              </Show>
-              <Show when={lot.edited}>
-                <span class="badge edited" title="Ordre modifié manuellement — les valeurs importées restent restaurables.">
-                  modifié
-                </span>
-              </Show>
-              <Show when={lot.manual}>
-                <span class="badge manual" title="Opération ajoutée manuellement.">
-                  manuel
-                </span>
-              </Show>
-            </span>
-            <span class="lot-broker">{lot.origin_broker}</span>
-            <span class="num lot-stat lot-quantity" data-label="Quantité">
-              {num(lot.remaining_quantity)}
-              <Show when={lot.remaining_quantity !== lot.initial_quantity}>
-                <span class="muted"> / {num(lot.initial_quantity)}</span>
-              </Show>
-            </span>
-            <span class="num lot-stat lot-price" data-label="Prix de référence">
-              {eur(lot.unit_cost)}
-            </span>
-            <span class="num muted lot-stat lot-fees" data-label="Frais">
-              {Number(lot.fees) ? eur(lot.fees) : "—"}
-            </span>
-            <span class="num lot-stat lot-invested" data-label="Investi">
-              {eur(lot.invested)}
-            </span>
-            <span class="num lot-stat lot-value" data-label="Valeur">
-              {eur(lot.market_value)}
-            </span>
-            <span
-              class={`num lot-stat lot-pnl ${perfClass(lot.pnl)}`}
-              data-label="P/L latent"
-            >
-              {lot.pnl ? eur(lot.pnl) : "—"}
-            </span>
-            <span class="perf-col lot-stat lot-performance" data-label="Performance">
-              <DivergingBar pct={lot.pnl_pct} />
-              <span class={`num pct ${perfClass(lot.pnl_pct)}`}>{pct(lot.pnl_pct)}</span>
-            </span>
-            <span class="num muted lot-stat lot-holding" data-label="Détention">
-              {holdingSince(lot.acquisition_date)}
-            </span>
-            <span class="lot-actions">
-              <Show when={lot.tx_id !== null}>
-                <button
-                  type="button"
-                  class="btn-icon"
-                  title="Modifier cet ordre"
-                  aria-label="Modifier cet ordre"
-                  onClick={() => props.onEdit(lot)}
-                >
-                  ✎
-                </button>
-              </Show>
-            </span>
-          </div>
+          <>
+            <LotRow
+              lot={lot}
+              expanded={expanded().has(lot.id)}
+              onToggle={() => toggle(lot.id)}
+              onEdit={props.onEdit}
+            />
+            <Show when={lot.children.length > 0 && expanded().has(lot.id)}>
+              <For each={lot.children}>
+                {(child) => <LotRow lot={child} child onEdit={props.onEdit} />}
+              </For>
+            </Show>
+          </>
         )}
       </For>
     </div>
@@ -787,11 +862,15 @@ export default function App() {
     }
   }
 
+  // Deux clics plutôt que window.confirm (absent du WebView iOS/macOS).
+  const [confirmDemoDelete, setConfirmDemoDelete] = createSignal(false);
+
   async function onDeleteDemo() {
-    const confirmed = window.confirm(
-      "Supprimer toutes les données d'exemple ? Vos imports personnels ne seront pas touchés.",
-    );
-    if (!confirmed) return;
+    if (!confirmDemoDelete()) {
+      setConfirmDemoDelete(true);
+      return;
+    }
+    setConfirmDemoDelete(false);
     setDeletingDemo(true);
     setDemoError(null);
     try {
@@ -857,7 +936,11 @@ export default function App() {
                   disabled={deletingDemo()}
                   onClick={onDeleteDemo}
                 >
-                  {deletingDemo() ? "Suppression…" : "Supprimer les exemples"}
+                  {deletingDemo()
+                    ? "Suppression…"
+                    : confirmDemoDelete()
+                      ? "Confirmer la suppression ?"
+                      : "Supprimer les exemples"}
                 </button>
               </section>
             </Show>

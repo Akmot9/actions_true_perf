@@ -25,6 +25,8 @@ export interface LotView {
   pnl_pct: string | null;
   unreconciled: boolean;
   income_events: number;
+  /** Versements individuels quand la ligne regroupe du staking ; vide sinon. */
+  children: LotView[];
 }
 
 export type ManualOperation = "BUY" | "SELL" | "DIVIDEND" | "STAKING";

@@ -512,6 +512,45 @@ input {
   border: 1px solid color-mix(in srgb, var(--brass) 55%, transparent);
 }
 
+/* Versement individuel sous une ligne de staking regroupée. */
+.lot-row.lot-child {
+  background: color-mix(in srgb, var(--panel-2) 45%, transparent);
+  font-size: 13px;
+}
+
+.lot-row.lot-child .lot-date {
+  padding-left: 22px;
+}
+
+/* Déplie/replie les versements d'une ligne de staking regroupée. */
+.btn-toggle {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-toggle:hover,
+.btn-toggle:focus-visible {
+  color: var(--brass);
+}
+
+.btn-toggle:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+/* Bouton de suppression armé, en attente du clic de confirmation. */
+.btn.arming {
+  color: var(--loss);
+  border-color: var(--loss);
+}
+
 .btn-icon {
   font: inherit;
   background: none;

@@ -170,41 +170,47 @@ fn manual_buy_dividend_and_staking_feed_the_portfolio() {
 
     let buy_id = db::insert_manual_transaction(
         &conn,
-        account,
-        instrument,
-        date,
-        "BUY",
-        Some(&dec("1")),
-        Some(&dec("50")),
-        &dec("1"),
-        None,
-        "[MANUEL] Achat manuel",
+        &db::ManualTxData {
+            account_id: account,
+            instrument_id: instrument,
+            date,
+            tx_type: "BUY",
+            quantity: Some(&dec("1")),
+            unit_price: Some(&dec("50")),
+            fees: &dec("1"),
+            amount: None,
+            description: "[MANUEL] Achat manuel",
+        },
     )
     .unwrap();
     db::insert_manual_transaction(
         &conn,
-        account,
-        instrument,
-        date,
-        "DIVIDEND",
-        None,
-        None,
-        &Decimal::ZERO,
-        Some(&dec("4.41")),
-        "[MANUEL] Dividende manuel",
+        &db::ManualTxData {
+            account_id: account,
+            instrument_id: instrument,
+            date,
+            tx_type: "DIVIDEND",
+            quantity: None,
+            unit_price: None,
+            fees: &Decimal::ZERO,
+            amount: Some(&dec("4.41")),
+            description: "[MANUEL] Dividende manuel",
+        },
     )
     .unwrap();
     db::insert_manual_transaction(
         &conn,
-        account,
-        instrument,
-        date,
-        "DIVIDEND",
-        Some(&dec("0.1")),
-        Some(&dec("10")),
-        &Decimal::ZERO,
-        None,
-        "[MANUEL] Staking manuel",
+        &db::ManualTxData {
+            account_id: account,
+            instrument_id: instrument,
+            date,
+            tx_type: "DIVIDEND",
+            quantity: Some(&dec("0.1")),
+            unit_price: Some(&dec("10")),
+            fees: &Decimal::ZERO,
+            amount: None,
+            description: "[MANUEL] Staking manuel",
+        },
     )
     .unwrap();
 
@@ -220,6 +226,43 @@ fn manual_buy_dividend_and_staking_feed_the_portfolio() {
         .lots
         .iter()
         .any(|lot| lot.income_events == 1));
+}
+
+#[test]
+fn migration_v7_reclassifies_legacy_free_receipts_both_ways() {
+    let conn = db::open(Path::new(":memory:")).unwrap();
+    let account = db::get_or_create_account(&conn, "Trade Republic", "CTO").unwrap();
+    let eth = db::get_or_create_instrument(&conn, Some("ETH-EUR"), None, "Ethereum").unwrap();
+    let tesla =
+        db::get_or_create_instrument(&conn, Some("TL0.DE"), Some("US88160R1014"), "Tesla").unwrap();
+
+    let insert = |tx_type: &str, instrument: i64, raw: &str, fp: &str| {
+        conn.execute(
+            "INSERT INTO transactions (account_id, date, type, instrument_id, quantity,
+             unit_price, fees, raw_description, fingerprint)
+             VALUES (?1, '2026-01-05', ?2, ?3, '0.0001', '2500', '0', ?4, ?5)",
+            rusqlite::params![account, tx_type, instrument, raw, fp],
+        )
+        .unwrap();
+    };
+    // Héritage v5 raté : staking stocké en BUY au format de repli du parseur
+    // (colonne description vide dans le CSV d'origine).
+    insert("BUY", eth, "DELIVERY/FREE_RECEIPT Ethereum", "legacy-eth");
+    // Héritage v5 trop large : action offerte reclassée à tort en DIVIDEND.
+    insert("DIVIDEND", tesla, "FREE_RECEIPT US88160R1014", "legacy-tesla");
+
+    conn.execute_batch(db::migrations().last().unwrap()).unwrap();
+
+    let type_of = |fp: &str| -> String {
+        conn.query_row(
+            "SELECT type FROM transactions WHERE fingerprint = ?1",
+            [fp],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(type_of("legacy-eth"), "DIVIDEND"); // staking crypto => dividende
+    assert_eq!(type_of("legacy-tesla"), "BUY"); // action offerte => acquisition
 }
 
 #[test]

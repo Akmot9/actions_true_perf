@@ -12,7 +12,13 @@ export function eur(value: string | number | null | undefined): string {
 
 export function num(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
-  return numFmt.format(Number(value));
+  const n = Number(value);
+  // Les quantités crypto minuscules (récompenses de staking) seraient
+  // arrondies à « 0 » avec 4 décimales : basculer en chiffres significatifs.
+  if (n !== 0 && Math.abs(n) < 0.001) {
+    return n.toLocaleString("fr-FR", { maximumSignificantDigits: 3 });
+  }
+  return numFmt.format(n);
 }
 
 export function pct(value: string | number | null | undefined): string {

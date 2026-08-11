@@ -130,6 +130,9 @@ pub struct LotView {
     pub pnl_pct: Option<Decimal>,
     pub unreconciled: bool,
     pub income_events: u32,
+    /// Versements individuels quand cette ligne regroupe des dividendes en
+    /// nature (staking) pour l'affichage ; vide pour un lot ordinaire.
+    pub children: Vec<LotView>,
 }
 
 #[derive(Serialize)]
@@ -181,8 +184,7 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
     let instruments = db::load_instruments(conn).map_err(|e| e.to_string())?;
     let quotes = db::load_quotes(conn).map_err(|e| e.to_string())?;
     let dividends = db::load_dividends(conn).map_err(|e| e.to_string())?;
-    let edited_ids = db::load_edited_ids(conn).map_err(|e| e.to_string())?;
-    let manual_ids = db::load_manual_ids(conn).map_err(|e| e.to_string())?;
+    let (edited_ids, manual_ids) = db::load_tx_flags(conn).map_err(|e| e.to_string())?;
 
     let out = replay(&txs);
 
@@ -250,8 +252,65 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
                 pnl_pct: lot_pnl.and_then(|p| pct(p, lot_invested)),
                 unreconciled: lot.unreconciled,
                 income_events: lot.income_events,
+                children: Vec::new(),
             });
         }
+
+        // Regroupement d'affichage : les versements de staking d'un même
+        // compte forment une seule ligne, dépliable en versements individuels
+        // (chacun gardant sa transaction, donc son édition). Le moteur, lui,
+        // travaille toujours par versement — FIFO et coûts exacts.
+        let (income, regular): (Vec<LotView>, Vec<LotView>) =
+            lot_views.into_iter().partition(|l| l.income_events > 0);
+        lot_views = regular;
+        let mut by_account: HashMap<String, Vec<LotView>> = HashMap::new();
+        for lot in income {
+            by_account.entry(lot.account.clone()).or_default().push(lot);
+        }
+        for (_, group) in by_account {
+            if group.len() == 1 {
+                lot_views.extend(group);
+                continue;
+            }
+            let remaining: Decimal = group.iter().map(|l| l.remaining_quantity).sum();
+            let initial: Decimal = group.iter().map(|l| l.initial_quantity).sum();
+            let group_invested: Decimal = group.iter().map(|l| l.invested).sum();
+            let group_fees: Decimal = group.iter().map(|l| l.fees).sum();
+            let group_value: Option<Decimal> =
+                group.iter().map(|l| l.market_value).sum::<Option<Decimal>>();
+            let group_pnl = group_value.map(|v| v - group_invested);
+            let unit_cost = if remaining.is_zero() {
+                Decimal::ZERO
+            } else {
+                (group
+                    .iter()
+                    .map(|l| l.remaining_quantity * l.unit_cost)
+                    .sum::<Decimal>()
+                    / remaining)
+                    .round_dp(6)
+            };
+            lot_views.push(LotView {
+                id: group[0].id,
+                tx_id: None,
+                edited: group.iter().any(|l| l.edited),
+                manual: group.iter().any(|l| l.manual),
+                acquisition_date: group.iter().filter_map(|l| l.acquisition_date).min(),
+                origin_broker: group[0].origin_broker.clone(),
+                account: group[0].account.clone(),
+                initial_quantity: initial,
+                remaining_quantity: remaining,
+                unit_cost,
+                fees: group_fees,
+                invested: group_invested.round_dp(2),
+                market_value: group_value.map(|v| v.round_dp(2)),
+                pnl: group_pnl.map(|p| p.round_dp(2)),
+                pnl_pct: group_pnl.and_then(|p| pct(p, group_invested)),
+                unreconciled: false,
+                income_events: group.len() as u32,
+                children: group,
+            });
+        }
+        lot_views.sort_by_key(|l| (l.acquisition_date.unwrap_or(NaiveDate::MIN), l.id));
 
         let has_quote = quote.is_some();
         let pnl = has_quote.then(|| market_value - invested);
@@ -371,9 +430,12 @@ fn validate_manual_transaction(
     if account_type.is_empty() {
         return Err("le type de compte est obligatoire".to_string());
     }
+    // Normalisation identique aux imports (BTC -> BTC-EUR, FDJ.PA -> FDJU.PA…)
+    // pour fusionner avec les instruments existants au lieu de créer des
+    // doublons sans cotation.
     let symbol = input
         .symbol
-        .map(|s| s.trim().to_uppercase())
+        .map(|s| portfolio_core::instruments::normalize_symbol_input(&s))
         .filter(|s| !s.is_empty());
     let fees = if input.fees.trim().is_empty() {
         Decimal::ZERO
@@ -440,41 +502,44 @@ fn save_manual_transaction(
     let input = validate_manual_transaction(input)?;
     let account_id = db::get_or_create_account(conn, &input.broker, &input.account_type)
         .map_err(|e| e.to_string())?;
+    // Un courtier n'a qu'un seul compte : si celui-ci existe déjà avec un
+    // autre type, le choix de l'utilisateur serait silencieusement écrasé —
+    // on refuse explicitement plutôt que d'enregistrer autre chose.
+    let actual_type: String = conn
+        .query_row(
+            "SELECT account_type FROM accounts WHERE id = ?1",
+            [account_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if actual_type != input.account_type {
+        return Err(format!(
+            "le compte « {} » existe déjà en {actual_type} ; choisissez {actual_type} ou un autre nom de compte",
+            input.broker
+        ));
+    }
     let instrument_id =
         db::get_or_create_instrument(conn, input.symbol.as_deref(), None, &input.instrument_name)
             .map_err(|e| e.to_string())?;
     let description = format!("[MANUEL] {}", input.operation_label);
 
+    let data = db::ManualTxData {
+        account_id,
+        instrument_id,
+        date: input.date,
+        tx_type: input.tx_type,
+        quantity: input.quantity.as_ref(),
+        unit_price: input.unit_price.as_ref(),
+        fees: &input.fees,
+        amount: input.amount.as_ref(),
+        description: &description,
+    };
     if let Some(id) = id {
-        db::update_manual_transaction(
-            conn,
-            id,
-            account_id,
-            instrument_id,
-            input.date,
-            input.tx_type,
-            input.quantity.as_ref(),
-            input.unit_price.as_ref(),
-            &input.fees,
-            input.amount.as_ref(),
-            &description,
-        )
-        .map_err(|_| "ligne manuelle introuvable ou protégée".to_string())?;
+        db::update_manual_transaction(conn, id, &data)
+            .map_err(|_| "ligne manuelle introuvable ou protégée".to_string())?;
         Ok(id)
     } else {
-        db::insert_manual_transaction(
-            conn,
-            account_id,
-            instrument_id,
-            input.date,
-            input.tx_type,
-            input.quantity.as_ref(),
-            input.unit_price.as_ref(),
-            &input.fees,
-            input.amount.as_ref(),
-            &description,
-        )
-        .map_err(|e| e.to_string())
+        db::insert_manual_transaction(conn, &data).map_err(|e| e.to_string())
     }
 }
 

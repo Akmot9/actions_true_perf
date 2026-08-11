@@ -89,7 +89,30 @@ const MIGRATIONS: &[&str] = &[
          key TEXT PRIMARY KEY,
          value TEXT NOT NULL
      );",
+    // v7 : corrige la reclassification staking de la v5. D'une part elle
+    // ratait les lignes stockées au format de repli du parseur
+    // (« DELIVERY/FREE_RECEIPT … », colonne description vide) — que le
+    // réimport ne peut pas réparer, l'empreinte bloquant l'insertion.
+    // D'autre part seules les réceptions CRYPTO sont du staking : une action
+    // offerte (parrainage) redevient un lot d'acquisition.
+    "UPDATE transactions SET type = 'DIVIDEND'
+      WHERE type = 'BUY'
+        AND (raw_description LIKE 'FREE_RECEIPT%'
+             OR raw_description LIKE 'DELIVERY/FREE_RECEIPT%')
+        AND instrument_id IN (SELECT id FROM instruments WHERE symbol LIKE '%-EUR');
+     UPDATE transactions SET type = 'BUY'
+      WHERE type = 'DIVIDEND'
+        AND (raw_description LIKE 'FREE_RECEIPT%'
+             OR raw_description LIKE 'DELIVERY/FREE_RECEIPT%')
+        AND instrument_id IN
+            (SELECT id FROM instruments WHERE symbol IS NULL OR symbol NOT LIKE '%-EUR');",
 ];
+
+/// Exposé pour les tests d'intégration : permet de rejouer une migration
+/// sur des données préparées « comme avant ».
+pub fn migrations() -> &'static [&'static str] {
+    MIGRATIONS
+}
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -167,6 +190,10 @@ pub fn seed_demo_if_first_run(conn: &Connection) -> rusqlite::Result<bool> {
         )?;
         return Ok(false);
     }
+
+    // Toutes les écritures du seed dans une même transaction : soit le jeu
+    // de découverte complet, soit rien.
+    let seed_tx = conn.unchecked_transaction()?;
 
     let (source_file_id, _) = record_import_file(
         conn,
@@ -412,6 +439,7 @@ pub fn seed_demo_if_first_run(conn: &Connection) -> rusqlite::Result<bool> {
         "INSERT INTO app_settings (key, value) VALUES (?1, 'seeded')",
         params![DEMO_INITIALIZED_SETTING],
     )?;
+    seed_tx.commit()?;
     Ok(true)
 }
 
@@ -602,23 +630,24 @@ pub fn insert_transaction(
     Ok(n > 0)
 }
 
-/// Ligne saisie directement dans l'application. Contrairement aux imports,
-/// elle n'a pas de fichier source ; cette propriété sert aussi à limiter la
+/// Champs d'une ligne saisie directement dans l'application, partagés entre
+/// insertion et mise à jour. Contrairement aux imports, une ligne manuelle
+/// n'a pas de fichier source ; cette propriété sert aussi à limiter la
 /// modification et la suppression aux seules données appartenant à
 /// l'utilisateur.
-#[allow(clippy::too_many_arguments)]
-pub fn insert_manual_transaction(
-    conn: &Connection,
-    account_id: i64,
-    instrument_id: i64,
-    date: NaiveDate,
-    tx_type: &str,
-    quantity: Option<&Decimal>,
-    unit_price: Option<&Decimal>,
-    fees: &Decimal,
-    amount: Option<&Decimal>,
-    description: &str,
-) -> rusqlite::Result<i64> {
+pub struct ManualTxData<'a> {
+    pub account_id: i64,
+    pub instrument_id: i64,
+    pub date: NaiveDate,
+    pub tx_type: &'a str,
+    pub quantity: Option<&'a Decimal>,
+    pub unit_price: Option<&'a Decimal>,
+    pub fees: &'a Decimal,
+    pub amount: Option<&'a Decimal>,
+    pub description: &'a str,
+}
+
+pub fn insert_manual_transaction(conn: &Connection, data: &ManualTxData) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO transactions
          (account_id, date, type, instrument_id, quantity, unit_price, fees,
@@ -626,33 +655,24 @@ pub fn insert_manual_transaction(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL,
                  'manual-' || lower(hex(randomblob(16))))",
         params![
-            account_id,
-            date.to_string(),
-            tx_type,
-            instrument_id,
-            quantity.map(ToString::to_string),
-            unit_price.map(ToString::to_string),
-            fees.to_string(),
-            amount.map(ToString::to_string),
-            description,
+            data.account_id,
+            data.date.to_string(),
+            data.tx_type,
+            data.instrument_id,
+            data.quantity.map(ToString::to_string),
+            data.unit_price.map(ToString::to_string),
+            data.fees.to_string(),
+            data.amount.map(ToString::to_string),
+            data.description,
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn update_manual_transaction(
     conn: &Connection,
     id: i64,
-    account_id: i64,
-    instrument_id: i64,
-    date: NaiveDate,
-    tx_type: &str,
-    quantity: Option<&Decimal>,
-    unit_price: Option<&Decimal>,
-    fees: &Decimal,
-    amount: Option<&Decimal>,
-    description: &str,
+    data: &ManualTxData,
 ) -> rusqlite::Result<()> {
     let changed = conn.execute(
         "UPDATE transactions
@@ -662,15 +682,15 @@ pub fn update_manual_transaction(
          WHERE id = ?1 AND source_file_id IS NULL",
         params![
             id,
-            account_id,
-            instrument_id,
-            date.to_string(),
-            tx_type,
-            quantity.map(ToString::to_string),
-            unit_price.map(ToString::to_string),
-            fees.to_string(),
-            amount.map(ToString::to_string),
-            description,
+            data.account_id,
+            data.instrument_id,
+            data.date.to_string(),
+            data.tx_type,
+            data.quantity.map(ToString::to_string),
+            data.unit_price.map(ToString::to_string),
+            data.fees.to_string(),
+            data.amount.map(ToString::to_string),
+            data.description,
         ],
     )?;
     if changed == 0 {
@@ -739,10 +759,30 @@ pub fn load_manual_transactions(conn: &Connection) -> rusqlite::Result<Vec<Manua
     rows.collect()
 }
 
-pub fn load_manual_ids(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM transactions WHERE source_file_id IS NULL")?;
-    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-    Ok(rows.filter_map(Result::ok).collect())
+/// Identifiants des transactions éditées et des transactions saisies
+/// manuellement, en un seul parcours.
+pub fn load_tx_flags(
+    conn: &Connection,
+) -> rusqlite::Result<(std::collections::HashSet<i64>, std::collections::HashSet<i64>)> {
+    let mut stmt = conn.prepare(
+        "SELECT id, edited_at IS NOT NULL, source_file_id IS NULL
+         FROM transactions
+         WHERE edited_at IS NOT NULL OR source_file_id IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?))
+    })?;
+    let mut edited = std::collections::HashSet::new();
+    let mut manual = std::collections::HashSet::new();
+    for row in rows.filter_map(Result::ok) {
+        if row.1 {
+            edited.insert(row.0);
+        }
+        if row.2 {
+            manual.insert(row.0);
+        }
+    }
+    Ok((edited, manual))
 }
 
 pub fn upsert_quote(
@@ -898,11 +938,6 @@ pub fn revert_transaction(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 }
 
 /// Identifiants des transactions modifiées manuellement.
-pub fn load_edited_ids(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM transactions WHERE edited_at IS NOT NULL")?;
-    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-    Ok(rows.filter_map(Result::ok).collect())
-}
 
 /// Somme des dividendes par instrument. Pour un dividende en nature sans
 /// montant espèces (staking), utilise sa valeur de marché à la réception.
@@ -1069,37 +1104,42 @@ mod tests {
 
         let id = insert_manual_transaction(
             &conn,
-            account,
-            instrument,
-            date,
-            "BUY",
-            Some(&quantity),
-            Some(&price),
-            &fees,
-            None,
-            "[MANUEL] Achat manuel",
+            &ManualTxData {
+                account_id: account,
+                instrument_id: instrument,
+                date,
+                tx_type: "BUY",
+                quantity: Some(&quantity),
+                unit_price: Some(&price),
+                fees: &fees,
+                amount: None,
+                description: "[MANUEL] Achat manuel",
+            },
         )
         .unwrap();
         let rows = load_manual_transactions(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
         assert_eq!(rows[0].operation, "BUY");
-        assert!(load_manual_ids(&conn).unwrap().contains(&id));
+        let (_, manual_ids) = load_tx_flags(&conn).unwrap();
+        assert!(manual_ids.contains(&id));
 
         let staking_quantity = demo_decimal("0.0002");
         let staking_price = demo_decimal("72.83");
         update_manual_transaction(
             &conn,
             id,
-            account,
-            instrument,
-            date,
-            "DIVIDEND",
-            Some(&staking_quantity),
-            Some(&staking_price),
-            &Decimal::ZERO,
-            None,
-            "[MANUEL] Staking manuel",
+            &ManualTxData {
+                account_id: account,
+                instrument_id: instrument,
+                date,
+                tx_type: "DIVIDEND",
+                quantity: Some(&staking_quantity),
+                unit_price: Some(&staking_price),
+                fees: &Decimal::ZERO,
+                amount: None,
+                description: "[MANUEL] Staking manuel",
+            },
         )
         .unwrap();
         let rows = load_manual_transactions(&conn).unwrap();

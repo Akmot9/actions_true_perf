@@ -113,9 +113,18 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
             ("TRADING", "BUY") => (TxType::Buy, instrument, shares, price),
             ("TRADING", "SELL") => (TxType::Sell, instrument, shares, price),
             // Récompenses de staking versées en crypto : dividende en nature,
-            // valorisé au prix de marché du jour de réception.
-            ("DELIVERY", "FREE_RECEIPT") => (
+            // valorisé au prix de marché du jour de réception. Une réception
+            // gratuite d'un AUTRE actif (action de parrainage…) n'est pas un
+            // revenu récurrent : elle crée un lot d'acquisition, comme une
+            // attribution gratuite.
+            ("DELIVERY", "FREE_RECEIPT") if asset_class == "CRYPTO" => (
                 TxType::Dividend,
+                instrument,
+                shares,
+                price.or(Some(Decimal::ZERO)),
+            ),
+            ("DELIVERY", "FREE_RECEIPT") => (
+                TxType::Buy,
                 instrument,
                 shares,
                 price.or(Some(Decimal::ZERO)),
@@ -237,6 +246,20 @@ mod tests {
         let staking = &parsed.transactions[2];
         assert_eq!(staking.quantity, Some(dec!(0.0000020000)));
         assert_eq!(staking.unit_price, Some(dec!(2488.4600000000)));
+    }
+
+    #[test]
+    fn free_receipt_of_a_stock_is_an_acquisition_not_staking() {
+        // Action offerte (parrainage) : lot d'acquisition au prix de marché,
+        // jamais comptée dans les revenus de staking/dividendes.
+        let csv = r#""datetime","date","account_type","category","type","asset_class","name","symbol","shares","price","amount","fee","tax","currency","original_amount","original_currency","fx_rate","description","transaction_id","counterparty_name","counterparty_iban","payment_reference","mcc_code"
+"2026-02-01T10:00:00Z","2026-02-01","DEFAULT","DELIVERY","FREE_RECEIPT","STOCK","Tesla","US88160R1014","0.1000000000","300.00","","","","EUR","","","","FREE_RECEIPT US88160R1014","b29126a1-0000-0000-0000-00000000000a","","","",""
+"#;
+        let parsed = parse(csv).unwrap();
+        let gift = &parsed.transactions[0];
+        assert_eq!(gift.tx_type, TxType::Buy);
+        assert_eq!(gift.quantity, Some(dec!(0.1)));
+        assert_eq!(gift.unit_price, Some(dec!(300.00)));
     }
 
     #[test]

@@ -68,11 +68,15 @@ pub struct ReplayOutput {
 fn type_priority(t: TxType) -> u8 {
     match t {
         TxType::Buy => 0,
-        TxType::Split => 1,
-        TxType::TransferOut => 2,
-        TxType::TransferIn => 3,
-        TxType::Sell => 4,
-        _ => 5,
+        // Un dividende en nature (récompense de staking) reçu le même jour
+        // qu'une vente ou un transfert doit exister avant que ceux-ci ne
+        // consomment la position.
+        TxType::Dividend => 1,
+        TxType::Split => 2,
+        TxType::TransferOut => 3,
+        TxType::TransferIn => 4,
+        TxType::Sell => 5,
+        _ => 6,
     }
 }
 
@@ -137,47 +141,40 @@ fn apply_buy(out: &mut ReplayOutput, tx: &EngineTx) {
 }
 
 /// Un dividende en numéraire n'affecte pas les lots. Un dividende **en
-/// nature** (quantité + prix de réception : récompenses de staking…) est
-/// accumulé dans un lot de revenus unique par instrument et par compte,
-/// valorisé au prix de marché de chaque réception — les ordres d'achat
-/// réels ne sont pas noyés sous des micro-lots hebdomadaires.
+/// nature** (quantité + prix de réception : récompenses de staking…) crée un
+/// lot daté du versement, exactement comme un achat : l'ordre FIFO, la base
+/// de coût (frais inclus) et l'édition transaction par transaction restent
+/// exacts. Le regroupement des versements est un choix d'affichage, fait en
+/// aval — jamais ici.
 fn apply_dividend(out: &mut ReplayOutput, tx: &EngineTx) {
-    let (Some(instrument_id), Some(qty), Some(price)) =
-        (tx.instrument_id, tx.quantity, tx.unit_price)
-    else {
+    let (Some(qty), Some(price)) = (tx.quantity, tx.unit_price) else {
         return; // dividende en numéraire
     };
     if qty.is_zero() {
         return;
     }
-    if let Some(lot) = out.lots.iter_mut().find(|l| {
-        l.instrument_id == instrument_id && l.account_id == tx.account_id && l.income_events > 0
-    }) {
-        // Une vente a pu consommer une partie des versements précédents : le
-        // nouveau PRU doit porter sur la quantité encore détenue, pas sur la
-        // quantité historique déjà partiellement cédée.
-        let remaining_cost = lot.remaining_quantity * lot.unit_cost;
-        lot.initial_quantity += qty;
-        lot.remaining_quantity += qty;
-        lot.unit_cost = (remaining_cost + qty * price) / lot.remaining_quantity;
-        lot.income_events += 1;
-    } else {
-        let id = out.lots.len();
-        out.lots.push(Lot {
-            id,
-            buy_tx_id: None,
-            instrument_id,
-            account_id: tx.account_id,
-            origin_broker: tx.broker.clone(),
-            acquisition_date: tx.date,
-            initial_quantity: qty,
-            remaining_quantity: qty,
-            unit_cost: price,
-            fees: Decimal::ZERO,
-            unreconciled: false,
-            income_events: 1,
-        });
-    }
+    let Some(instrument_id) = tx.instrument_id else {
+        out.warnings.push(format!(
+            "Dividende en nature tx#{} sans instrument résolu : {qty} titres ignorés",
+            tx.id
+        ));
+        return;
+    };
+    let id = out.lots.len();
+    out.lots.push(Lot {
+        id,
+        buy_tx_id: Some(tx.id),
+        instrument_id,
+        account_id: tx.account_id,
+        origin_broker: tx.broker.clone(),
+        acquisition_date: tx.date,
+        initial_quantity: qty,
+        remaining_quantity: qty,
+        unit_cost: price,
+        fees: tx.fees,
+        unreconciled: false,
+        income_events: 1,
+    });
 }
 
 /// Indices des lots ouverts pour un instrument, en ordre FIFO
@@ -488,16 +485,70 @@ mod tests {
     }
 
     #[test]
-    fn in_kind_dividends_are_aggregated_at_weighted_cost() {
+    fn in_kind_dividends_create_dated_editable_lots() {
         let out = replay(&[
             tx(1, 1, "2024-01-10", TxType::Dividend, "2", "10"),
             tx(2, 1, "2024-02-10", TxType::Dividend, "3", "20"),
         ]);
 
-        assert_eq!(out.lots.len(), 1);
-        assert_eq!(out.lots[0].remaining_quantity, dec!(5));
-        assert_eq!(out.lots[0].unit_cost, dec!(16));
-        assert_eq!(out.lots[0].income_events, 2);
+        // Un lot par versement : dates exactes pour le FIFO, transaction
+        // sous-jacente conservée pour l'édition.
+        assert_eq!(out.lots.len(), 2);
+        assert_eq!(out.lots[0].acquisition_date, Some(d("2024-01-10")));
+        assert_eq!(out.lots[0].unit_cost, dec!(10));
+        assert_eq!(out.lots[0].buy_tx_id, Some(1));
+        assert_eq!(out.lots[1].unit_cost, dec!(20));
+        assert!(out.lots.iter().all(|l| l.income_events == 1));
+    }
+
+    #[test]
+    fn in_kind_dividend_between_buys_keeps_fifo_order() {
+        // Récompense en janvier, achat en mars, récompense en avril : le FIFO
+        // doit consommer janvier puis mars puis avril — la récompense d'avril
+        // ne doit pas être antidatée en janvier.
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Dividend, "1", "20"),
+            tx(2, 1, "2024-03-10", TxType::Buy, "1", "50"),
+            tx(3, 1, "2024-04-10", TxType::Dividend, "1", "80"),
+            tx(4, 1, "2024-06-10", TxType::Sell, "2", "100"),
+        ]);
+        assert_eq!(out.disposals.len(), 2);
+        assert_eq!(out.disposals[0].cost_basis, dec!(20)); // récompense de janvier
+        assert_eq!(out.disposals[1].cost_basis, dec!(50)); // achat de mars
+        let open: Vec<_> = out.lots.iter().filter(|l| !l.remaining_quantity.is_zero()).collect();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].unit_cost, dec!(80)); // la récompense d'avril reste
+    }
+
+    #[test]
+    fn same_day_reward_is_available_to_the_sell() {
+        // La récompense du jour doit être rejouée avant la vente du même
+        // jour : pas de survente fantôme, pas de lot résiduel.
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Buy, "1", "50"),
+            tx(3, 1, "2024-02-10", TxType::Sell, "1.01", "60"),
+            tx(2, 1, "2024-02-10", TxType::Dividend, "0.01", "55"),
+        ]);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert!(out.lots.iter().all(|l| l.remaining_quantity.is_zero()));
+    }
+
+    #[test]
+    fn in_kind_dividend_fees_count_in_cost_basis() {
+        let mut reward = tx(1, 1, "2024-01-10", TxType::Dividend, "2", "10");
+        reward.fees = dec!(0.50);
+        let out = replay(&[reward]);
+        assert_eq!(out.lots[0].invested_remaining(), dec!(20.50));
+    }
+
+    #[test]
+    fn in_kind_dividend_without_instrument_warns() {
+        let mut reward = tx(1, 1, "2024-01-10", TxType::Dividend, "2", "10");
+        reward.instrument_id = None;
+        let out = replay(&[reward]);
+        assert!(out.lots.is_empty());
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("sans instrument résolu"));
     }
 
     #[test]
@@ -519,10 +570,12 @@ mod tests {
             tx(3, 1, "2024-02-10", TxType::Dividend, "3", "20"),
         ]);
 
-        assert_eq!(out.lots[0].initial_quantity, dec!(5));
-        assert_eq!(out.lots[0].remaining_quantity, dec!(4));
-        assert_eq!(out.lots[0].unit_cost, dec!(17.5));
-        assert_eq!(out.lots[0].invested_remaining(), dec!(70));
+        // La vente a consommé 1 titre du versement de janvier (coût 10) ;
+        // celui de février reste intact avec son propre coût.
         assert_eq!(out.disposals[0].cost_basis, dec!(10));
+        assert_eq!(out.lots[0].remaining_quantity, dec!(1));
+        assert_eq!(out.lots[1].remaining_quantity, dec!(3));
+        let invested: Decimal = out.lots.iter().map(|l| l.invested_remaining()).sum();
+        assert_eq!(invested, dec!(70)); // 1×10 + 3×20
     }
 }

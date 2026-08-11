@@ -105,6 +105,20 @@ pub fn resolve_isin(isin: &str, fallback_name: &str) -> InstrumentRef {
     }
 }
 
+/// Normalise un symbole saisi à la main : majuscules, symboles obsolètes
+/// canonisés, tickers crypto nus (BTC, ETH…) convertis en paire euro — pour
+/// que la saisie manuelle fusionne avec les instruments importés au lieu de
+/// créer des doublons sans cotation.
+pub fn normalize_symbol_input(input: &str) -> String {
+    let up = input.trim().to_uppercase();
+    for (known, market, _) in CRYPTO_ALIASES {
+        if up == *known {
+            return (*market).to_string();
+        }
+    }
+    canonical_symbol(&up)
+}
+
 /// Résout un symbole crypto (BTC, ETH…) vers sa paire euro Yahoo.
 pub fn resolve_crypto(symbol: &str, fallback_name: &str) -> InstrumentRef {
     let up = symbol.trim().to_uppercase();
@@ -146,6 +160,14 @@ mod tests {
         // La ligne PF28 (changement de forme de détention) reste Air Liquide.
         let ai = resolve_label("AIR LIQUIDE PF28");
         assert_eq!(ai.symbol.as_deref(), Some("AI.PA"));
+    }
+
+    #[test]
+    fn manual_symbol_input_is_normalized() {
+        assert_eq!(normalize_symbol_input(" btc "), "BTC-EUR");
+        assert_eq!(normalize_symbol_input("FDJ.PA"), "FDJU.PA");
+        assert_eq!(normalize_symbol_input("ai.pa"), "AI.PA");
+        assert_eq!(normalize_symbol_input("SOL-EUR"), "SOL-EUR");
     }
 
     #[test]
