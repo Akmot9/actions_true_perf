@@ -52,7 +52,11 @@ const ISIN_ALIASES: &[(&str, &str, &str)] = &[
     ("NL00150001Q9", "STLAP.PA", "Stellantis"),
     ("FR0000051732", "ATO.PA", "Atos"),
     ("US88160R1014", "TL0.DE", "Tesla"),
-    ("IE00B3WJKG14", "QDVE.DE", "S&P 500 Information Technology (Acc)"),
+    (
+        "IE00B3WJKG14",
+        "QDVE.DE",
+        "S&P 500 Information Technology (Acc)",
+    ),
 ];
 
 /// Cryptomonnaies : symbole courtier → paire Yahoo cotée en euros.
@@ -94,7 +98,11 @@ pub fn resolve_isin(isin: &str, fallback_name: &str) -> InstrumentRef {
             };
         }
     }
-    InstrumentRef { symbol: None, isin: Some(up), name: fallback_name.trim().to_string() }
+    InstrumentRef {
+        symbol: None,
+        isin: Some(up),
+        name: fallback_name.trim().to_string(),
+    }
 }
 
 /// Résout un symbole crypto (BTC, ETH…) vers sa paire euro Yahoo.
@@ -147,7 +155,10 @@ mod tests {
         assert_eq!(canonical_symbol("STM.PA"), "STMPA.PA");
         assert_eq!(canonical_symbol("DSY.PA"), "DSY.PA");
         // Libellé courtier et symbole obsolète convergent vers le même instrument.
-        assert_eq!(resolve_label("STELLANTIS").symbol.as_deref(), Some("STLAP.PA"));
+        assert_eq!(
+            resolve_label("STELLANTIS").symbol.as_deref(),
+            Some("STLAP.PA")
+        );
     }
 
     #[test]

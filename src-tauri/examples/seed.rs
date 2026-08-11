@@ -10,7 +10,10 @@ use actions_true_perf_lib::db;
 use std::path::Path;
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let data_dir = dirs_path();
     std::fs::create_dir_all(&data_dir).expect("création du dossier de données");
     let db_path = data_dir.join("portfolio.db");
@@ -19,12 +22,17 @@ fn main() {
 
     let mut files: Vec<std::path::PathBuf> = vec![root.join("portfolio.csv")];
     if let Ok(entries) = std::fs::read_dir(&root) {
-        files.extend(entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| {
-            p.file_name().is_some_and(|n| {
-                let n = n.to_string_lossy();
-                n.starts_with("Releve_compte") || n.starts_with("transactions_")
-            })
-        }));
+        files.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name().is_some_and(|n| {
+                        let n = n.to_string_lossy();
+                        n.starts_with("Releve_compte") || n.starts_with("transactions_")
+                    })
+                }),
+        );
     }
 
     for path in files {

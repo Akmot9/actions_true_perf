@@ -20,8 +20,14 @@ pub fn detect(headers: &[String]) -> bool {
 }
 
 pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(content.as_bytes());
-    let headers: Vec<String> = reader.headers()?.iter().map(|h| h.trim().to_string()).collect();
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(content.as_bytes());
+    let headers: Vec<String> = reader
+        .headers()?
+        .iter()
+        .map(|h| h.trim().to_string())
+        .collect();
     let col = |name: &str| headers.iter().position(|h| h == name);
     let (c_symbol, c_price_now, c_trade_date, c_price, c_qty, c_commission, c_type) = (
         col("Symbol"),
@@ -41,7 +47,12 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
     for (i, record) in reader.records().enumerate() {
         let record = record?;
         let row = i + 2;
-        let field = |c: Option<usize>| c.and_then(|c| record.get(c)).unwrap_or("").trim().to_string();
+        let field = |c: Option<usize>| {
+            c.and_then(|c| record.get(c))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
 
         let raw_symbol = field(c_symbol);
         if raw_symbol.is_empty() {
@@ -50,7 +61,9 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
         let symbol = canonical_symbol(&raw_symbol);
         let tx_type_s = field(c_type);
         if !tx_type_s.is_empty() && tx_type_s != "BUY" {
-            warnings.push(format!("ligne {row}: type « {tx_type_s} » non géré pour {symbol}, ignoré"));
+            warnings.push(format!(
+                "ligne {row}: type « {tx_type_s} » non géré pour {symbol}, ignoré"
+            ));
             continue;
         }
 
@@ -133,7 +146,10 @@ DSY.PA,22.06,2026/08/10,10:11 CEST,-0.19,22.21,22.21,21.99,102349,20221223,33.4,
         assert_eq!(parsed.transactions.len(), 3);
         assert!(parsed.transactions.iter().all(|t| t.tx_type == TxType::Buy));
         let dsy1 = &parsed.transactions[1];
-        assert_eq!(dsy1.date, Some(NaiveDate::from_ymd_opt(2023, 2, 1).unwrap()));
+        assert_eq!(
+            dsy1.date,
+            Some(NaiveDate::from_ymd_opt(2023, 2, 1).unwrap())
+        );
         assert_eq!(dsy1.unit_price, Some(dec!(34.0)));
         assert_eq!(dsy1.quantity, Some(dec!(5.0)));
     }
@@ -142,7 +158,10 @@ DSY.PA,22.06,2026/08/10,10:11 CEST,-0.19,22.21,22.21,21.99,102349,20221223,33.4,
     fn missing_trade_date_kept_with_warning() {
         let parsed = parse(SAMPLE).unwrap();
         assert_eq!(parsed.transactions[0].date, None);
-        assert!(parsed.warnings.iter().any(|w| w.contains("sans date d'achat")));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("sans date d'achat")));
     }
 
     #[test]
@@ -156,7 +175,10 @@ DSY.PA,22.06,2026/08/10,10:11 CEST,-0.19,22.21,22.21,21.99,102349,20221223,33.4,
         let parsed = parse(SAMPLE).unwrap();
         // La ligne FDJ.PA du fichier doit produire l'instrument FDJU.PA actuel.
         let fdj = &parsed.transactions[0];
-        assert_eq!(fdj.instrument.as_ref().unwrap().symbol.as_deref(), Some("FDJU.PA"));
+        assert_eq!(
+            fdj.instrument.as_ref().unwrap().symbol.as_deref(),
+            Some("FDJU.PA")
+        );
         assert_eq!(fdj.instrument.as_ref().unwrap().name, "FDJ United");
     }
 }

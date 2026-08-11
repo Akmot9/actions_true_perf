@@ -10,7 +10,10 @@ use std::path::Path;
 use std::str::FromStr;
 
 fn repo_root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn read_samples() -> Option<(String, String)> {
@@ -46,7 +49,11 @@ fn trade_republic_import_merges_air_liquide_across_brokers() {
     do_import(&conn, "releve_bd.csv", &bd).unwrap();
     do_import(&conn, "portfolio.csv", &yahoo).unwrap();
     let r = do_import(&conn, "transactions.csv", &tr).unwrap();
-    assert!(r.inserted > 800, "export TR complet importé ({} lignes)", r.inserted);
+    assert!(
+        r.inserted > 800,
+        "export TR complet importé ({} lignes)",
+        r.inserted
+    );
 
     // Réimport : zéro doublon grâce aux transaction_id.
     let r2 = do_import(&conn, "transactions.csv", &tr).unwrap();
@@ -57,7 +64,11 @@ fn trade_republic_import_merges_air_liquide_across_brokers() {
     // Une SEULE position Air Liquide, fusion des trois sources : lots PEA
     // (portfolio.csv, transférés chez Bourse Direct) + plan d'épargne et
     // attribution gratuite Trade Republic.
-    let ai: Vec<_> = p.positions.iter().filter(|p| p.symbol.as_deref() == Some("AI.PA")).collect();
+    let ai: Vec<_> = p
+        .positions
+        .iter()
+        .filter(|p| p.symbol.as_deref() == Some("AI.PA"))
+        .collect();
     assert_eq!(ai.len(), 1);
     let ai = ai[0];
     assert!(ai.lots.iter().any(|l| l.origin_broker == "BoursoBank"));
@@ -70,11 +81,31 @@ fn trade_republic_import_merges_air_liquide_across_brokers() {
     );
 
     // Les cryptos ont des paires euro et les ventes ont réduit les lots.
-    let btc = p.positions.iter().find(|p| p.symbol.as_deref() == Some("BTC-EUR"));
+    let btc = p
+        .positions
+        .iter()
+        .find(|p| p.symbol.as_deref() == Some("BTC-EUR"));
     assert!(btc.is_some(), "position Bitcoin présente");
 
+    // Les récompenses hebdomadaires de staking sont chacune des dividendes,
+    // mais ne forment plus qu'un lot synthétique par crypto dans l'interface.
+    for symbol in ["ETH-EUR", "SOL-EUR"] {
+        let crypto = p
+            .positions
+            .iter()
+            .find(|p| p.symbol.as_deref() == Some(symbol))
+            .unwrap();
+        let staking: Vec<_> = crypto.lots.iter().filter(|l| l.income_events > 0).collect();
+        assert_eq!(staking.len(), 1, "un seul lot de staking pour {symbol}");
+        assert!(staking[0].income_events > 1);
+        assert!(crypto.dividends > Decimal::ZERO);
+    }
+
     // Le fonds private equity existe sans cotation (pas de symbole Yahoo).
-    assert!(p.positions.iter().any(|q| q.name.contains("Private Equity") && q.quote.is_none()));
+    assert!(p
+        .positions
+        .iter()
+        .any(|q| q.name.contains("Private Equity") && q.quote.is_none()));
 }
 
 #[test]
@@ -130,6 +161,68 @@ Date,Désignation,Qté,Cours,Crédit (€),Débit (€)
 }
 
 #[test]
+fn manual_buy_dividend_and_staking_feed_the_portfolio() {
+    let conn = db::open(Path::new(":memory:")).unwrap();
+    let account = db::get_or_create_account(&conn, "Compte manuel", "CTO").unwrap();
+    let instrument =
+        db::get_or_create_instrument(&conn, Some("TEST.PA"), None, "Titre test").unwrap();
+    let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+
+    let buy_id = db::insert_manual_transaction(
+        &conn,
+        account,
+        instrument,
+        date,
+        "BUY",
+        Some(&dec("1")),
+        Some(&dec("50")),
+        &dec("1"),
+        None,
+        "[MANUEL] Achat manuel",
+    )
+    .unwrap();
+    db::insert_manual_transaction(
+        &conn,
+        account,
+        instrument,
+        date,
+        "DIVIDEND",
+        None,
+        None,
+        &Decimal::ZERO,
+        Some(&dec("4.41")),
+        "[MANUEL] Dividende manuel",
+    )
+    .unwrap();
+    db::insert_manual_transaction(
+        &conn,
+        account,
+        instrument,
+        date,
+        "DIVIDEND",
+        Some(&dec("0.1")),
+        Some(&dec("10")),
+        &Decimal::ZERO,
+        None,
+        "[MANUEL] Staking manuel",
+    )
+    .unwrap();
+
+    let portfolio = build_portfolio(&conn).unwrap();
+    assert_eq!(portfolio.positions.len(), 1);
+    assert_eq!(portfolio.positions[0].quantity, dec("1.1"));
+    assert_eq!(portfolio.total_dividends, dec("5.41"));
+    assert!(portfolio.positions[0]
+        .lots
+        .iter()
+        .any(|lot| lot.tx_id == Some(buy_id) && lot.manual));
+    assert!(portfolio.positions[0]
+        .lots
+        .iter()
+        .any(|lot| lot.income_events == 1));
+}
+
+#[test]
 fn full_import_reconciles_transfers_and_keeps_per_order_lots() {
     let Some((yahoo, bd)) = read_samples() else {
         eprintln!("fichiers d'exemple absents, test sauté");
@@ -144,7 +237,11 @@ fn full_import_reconciles_transfers_and_keeps_per_order_lots() {
 
     // Avant l'import de l'historique : 141 Nexity toutes non rapprochées.
     let p = build_portfolio(&conn).unwrap();
-    let nexity = p.positions.iter().find(|p| p.symbol.as_deref() == Some("NXI.PA")).unwrap();
+    let nexity = p
+        .positions
+        .iter()
+        .find(|p| p.symbol.as_deref() == Some("NXI.PA"))
+        .unwrap();
     assert_eq!(nexity.unreconciled_quantity, dec("141"));
 
     let r2 = do_import(&conn, "portfolio.csv", &yahoo).unwrap();
@@ -161,7 +258,11 @@ fn full_import_reconciles_transfers_and_keeps_per_order_lots() {
 
     // Nexity : 22 issues de l'historique BoursoBank + 119 au PRU courtier,
     // plus les achats Bourse Direct (17+19+13+18+15+28 = 110) => 251.
-    let nexity = p.positions.iter().find(|p| p.symbol.as_deref() == Some("NXI.PA")).unwrap();
+    let nexity = p
+        .positions
+        .iter()
+        .find(|p| p.symbol.as_deref() == Some("NXI.PA"))
+        .unwrap();
     assert_eq!(nexity.quantity, dec("251"));
     assert_eq!(nexity.unreconciled_quantity, dec("119"));
     // 3 lots BoursoBank + 1 lot non rapproché + 6 achats Bourse Direct.
@@ -169,17 +270,28 @@ fn full_import_reconciles_transfers_and_keeps_per_order_lots() {
 
     // Dassault Systèmes : les 7 ordres d'origine restent visibles
     // individuellement, dates et prix intacts, malgré le transfert.
-    let dsy = p.positions.iter().find(|p| p.symbol.as_deref() == Some("DSY.PA")).unwrap();
+    let dsy = p
+        .positions
+        .iter()
+        .find(|p| p.symbol.as_deref() == Some("DSY.PA"))
+        .unwrap();
     assert_eq!(dsy.quantity, dec("33"));
     assert_eq!(dsy.unreconciled_quantity, dec("8"));
     assert_eq!(dsy.lots.len(), 8); // 7 ordres historiques + 1 non rapproché
-    let first = dsy.lots.iter().find(|l| l.unit_cost == dec("50.75")).unwrap();
+    let first = dsy
+        .lots
+        .iter()
+        .find(|l| l.unit_cost == dec("50.75"))
+        .unwrap();
     assert_eq!(first.acquisition_date.unwrap().to_string(), "2022-01-05");
     assert_eq!(first.origin_broker, "BoursoBank");
     assert_eq!(first.account, "Bourse Direct"); // compte actuel après transfert
 
     // Atos : position clôturée par l'indemnisation OST, absente du portefeuille.
-    assert!(p.positions.iter().all(|p| p.symbol.as_deref() != Some("ATO.PA")));
+    assert!(p
+        .positions
+        .iter()
+        .all(|p| p.symbol.as_deref() != Some("ATO.PA")));
     assert!(p.total_realized_pnl < Decimal::ZERO); // moins-value Atos réalisée
 
     // Les cours embarqués dans portfolio.csv alimentent le cache de cotations.

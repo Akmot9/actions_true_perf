@@ -5,7 +5,7 @@
   "identifier": "com.actions_true_perf.app",
   "build": {
     "beforeDevCommand": "deno task dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "deno task build",
     "frontendDist": "../dist"
   },

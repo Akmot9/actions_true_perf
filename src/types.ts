@@ -11,6 +11,7 @@ export interface LotView {
   id: number;
   tx_id: number | null;
   edited: boolean;
+  manual: boolean;
   acquisition_date: string | null;
   origin_broker: string;
   account: string;
@@ -23,6 +24,37 @@ export interface LotView {
   pnl: string | null;
   pnl_pct: string | null;
   unreconciled: boolean;
+  income_events: number;
+}
+
+export type ManualOperation = "BUY" | "SELL" | "DIVIDEND" | "STAKING";
+
+export interface ManualTransaction {
+  id: number;
+  date: string;
+  operation: ManualOperation;
+  instrument_id: number;
+  instrument_name: string;
+  symbol: string | null;
+  broker: string;
+  account_type: string;
+  quantity: string | null;
+  unit_price: string | null;
+  fees: string;
+  amount: string | null;
+}
+
+export interface ManualTransactionInput {
+  operation: ManualOperation;
+  date: string;
+  instrument_name: string;
+  symbol: string | null;
+  broker: string;
+  account_type: string;
+  quantity: string | null;
+  unit_price: string | null;
+  fees: string;
+  amount: string | null;
 }
 
 export interface PositionView {
@@ -43,6 +75,7 @@ export interface PositionView {
 }
 
 export interface PortfolioView {
+  has_demo_data: boolean;
   positions: PositionView[];
   total_invested: string;
   total_market_value: string;

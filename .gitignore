@@ -6,3 +6,9 @@ dist
 portfolio.csv
 Releve_compte_*.csv
 transactions_*.csv
+
+# Secrets de signature Apple et profils générés localement.
+apple-signing/
+AuthKey_*.p8
+*.p12
+*.mobileprovision

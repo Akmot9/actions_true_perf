@@ -1,0 +1,187 @@
+name: iOS · TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: Envoyer le build vers TestFlight
+        required: true
+        type: boolean
+        default: true
+      build_number:
+        description: Numéro de build Apple (vide = numéro du workflow)
+        required: false
+        type: string
+  push:
+    tags:
+      - "ios-v*"
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    name: Construire et publier l’IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    env:
+      IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
+      IOS_PRODUCT_NAME: ${{ vars.IOS_PRODUCT_NAME }}
+      APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}
+      APPSTORE_ISSUER_ID: ${{ vars.APPSTORE_ISSUER_ID }}
+      APPSTORE_API_KEY_ID: ${{ vars.APPSTORE_API_KEY_ID }}
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Vérifier les variables et secrets Apple
+        shell: bash
+        env:
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          APPSTORE_CERTIFICATES_FILE_BASE64: ${{ secrets.APPSTORE_CERTIFICATES_FILE_BASE64 }}
+          APPSTORE_CERTIFICATES_PASSWORD: ${{ secrets.APPSTORE_CERTIFICATES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          check_value() {
+            if [[ -z "$2" ]]; then
+              echo "::error::$1 n'est pas configuré dans les variables/secrets GitHub."
+              missing=1
+            fi
+          }
+
+          check_value IOS_BUNDLE_ID "$IOS_BUNDLE_ID"
+          check_value APPLE_TEAM_ID "$APPLE_DEVELOPMENT_TEAM"
+          check_value APPSTORE_ISSUER_ID "$APPSTORE_ISSUER_ID"
+          check_value APPSTORE_API_KEY_ID "$APPSTORE_API_KEY_ID"
+          check_value APPSTORE_API_PRIVATE_KEY "$APPSTORE_API_PRIVATE_KEY"
+          check_value APPSTORE_CERTIFICATES_FILE_BASE64 "$APPSTORE_CERTIFICATES_FILE_BASE64"
+          check_value APPSTORE_CERTIFICATES_PASSWORD "$APPSTORE_CERTIFICATES_PASSWORD"
+
+          if [[ ! "$IOS_BUNDLE_ID" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
+            echo "::error::IOS_BUNDLE_ID doit être au format DNS inversé, sans underscore."
+            missing=1
+          fi
+
+          exit "$missing"
+
+      - name: Sélectionner Xcode 26
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Installer Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Installer Rust et les cibles iOS
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Préparer les outils Tauri iOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+          pod --version
+          deno install --frozen
+
+      - name: Importer le certificat Apple Distribution
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPSTORE_CERTIFICATES_FILE_BASE64 }}
+          p12-password: ${{ secrets.APPSTORE_CERTIFICATES_PASSWORD }}
+
+      - name: Télécharger le profil App Store
+        uses: apple-actions/download-provisioning-profiles@v6
+        with:
+          bundle-id: ${{ vars.IOS_BUNDLE_ID }}
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+
+      - name: Créer la configuration iOS éphémère
+        id: ios-config
+        shell: bash
+        run: |
+          set -euo pipefail
+          product_name="${IOS_PRODUCT_NAME:-Suivi des ordres}"
+          config="$(jq -cn \
+            --arg identifier "$IOS_BUNDLE_ID" \
+            --arg productName "$product_name" \
+            '{identifier: $identifier, productName: $productName}')"
+          echo "json=$config" >> "$GITHUB_OUTPUT"
+
+      - name: Initialiser la cible iOS
+        shell: bash
+        env:
+          IOS_TAURI_CONFIG: ${{ steps.ios-config.outputs.json }}
+        run: |
+          set -euo pipefail
+          if [[ ! -d src-tauri/gen/apple ]]; then
+            deno task tauri ios init --ci --config "$IOS_TAURI_CONFIG"
+          fi
+
+      - name: Construire l’IPA signée
+        shell: bash
+        env:
+          IOS_TAURI_CONFIG: ${{ steps.ios-config.outputs.json }}
+          REQUESTED_BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          build_number="${REQUESTED_BUILD_NUMBER:-$GITHUB_RUN_NUMBER}"
+
+          if [[ ! "$build_number" =~ ^[0-9]+$ ]]; then
+            echo "::error::Le numéro de build doit être un entier positif."
+            exit 1
+          fi
+
+          deno task tauri ios build \
+            --export-method app-store-connect \
+            --build-number "$build_number" \
+            --config "$IOS_TAURI_CONFIG"
+
+      - name: Localiser l’IPA
+        id: ipa
+        shell: bash
+        run: |
+          set -euo pipefail
+          ipa_path="$(find src-tauri/gen/apple/build -type f -name '*.ipa' -print -quit)"
+
+          if [[ -z "$ipa_path" ]]; then
+            echo "::error::Tauri n'a produit aucun fichier IPA."
+            exit 1
+          fi
+
+          echo "path=$ipa_path" >> "$GITHUB_OUTPUT"
+          echo "IPA prête : $ipa_path"
+
+      - name: Conserver l’IPA dans les artefacts GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ github.run_number }}
+          path: ${{ steps.ipa.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Envoyer vers TestFlight
+        if: github.event_name == 'push' || inputs.upload_to_testflight == true
+        uses: apple-actions/upload-testflight-build@v5
+        with:
+          app-path: ${{ steps.ipa.outputs.path }}
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          wait-for-processing: "true"

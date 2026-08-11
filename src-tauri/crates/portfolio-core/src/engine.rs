@@ -26,6 +26,9 @@ pub struct Lot {
     /// Lot créé pour couvrir un transfert entrant sans historique d'achat.
     /// Résorbé automatiquement au prochain replay si l'historique est importé.
     pub unreconciled: bool,
+    /// Nombre de versements accumulés quand ce lot agrège des dividendes en
+    /// nature (récompenses de staking…). 0 pour un lot d'achat normal.
+    pub income_events: u32,
 }
 
 impl Lot {
@@ -80,7 +83,13 @@ pub fn replay(txs: &[EngineTx]) -> ReplayOutput {
     let mut txs: Vec<&EngineTx> = txs.iter().collect();
     // Les dates inconnues (ex: achats anciens sans date) passent en premier :
     // elles sont forcément antérieures à l'historique daté.
-    txs.sort_by_key(|t| (t.date.unwrap_or(NaiveDate::MIN), type_priority(t.tx_type), t.id));
+    txs.sort_by_key(|t| {
+        (
+            t.date.unwrap_or(NaiveDate::MIN),
+            type_priority(t.tx_type),
+            t.id,
+        )
+    });
 
     let mut out = ReplayOutput::default();
 
@@ -90,9 +99,9 @@ pub fn replay(txs: &[EngineTx]) -> ReplayOutput {
             TxType::Sell => apply_sell(&mut out, tx),
             TxType::TransferIn => apply_transfer_in(&mut out, tx),
             TxType::Split => apply_split(&mut out, tx),
+            TxType::Dividend => apply_dividend(&mut out, tx),
             // TRANSFER_OUT est administratif : c'est le TRANSFER_IN apparié
-            // qui déplace les lots. Dividendes/espèces/frais n'affectent pas
-            // les lots.
+            // qui déplace les lots. Espèces/frais n'affectent pas les lots.
             _ => {}
         }
     }
@@ -101,8 +110,13 @@ pub fn replay(txs: &[EngineTx]) -> ReplayOutput {
 }
 
 fn apply_buy(out: &mut ReplayOutput, tx: &EngineTx) {
-    let (Some(instrument_id), Some(qty), Some(price)) = (tx.instrument_id, tx.quantity, tx.unit_price) else {
-        out.warnings.push(format!("BUY tx#{} incomplet (instrument/quantité/prix manquant), ignoré", tx.id));
+    let (Some(instrument_id), Some(qty), Some(price)) =
+        (tx.instrument_id, tx.quantity, tx.unit_price)
+    else {
+        out.warnings.push(format!(
+            "BUY tx#{} incomplet (instrument/quantité/prix manquant), ignoré",
+            tx.id
+        ));
         return;
     };
     let id = out.lots.len();
@@ -118,7 +132,52 @@ fn apply_buy(out: &mut ReplayOutput, tx: &EngineTx) {
         unit_cost: price,
         fees: tx.fees,
         unreconciled: false,
+        income_events: 0,
     });
+}
+
+/// Un dividende en numéraire n'affecte pas les lots. Un dividende **en
+/// nature** (quantité + prix de réception : récompenses de staking…) est
+/// accumulé dans un lot de revenus unique par instrument et par compte,
+/// valorisé au prix de marché de chaque réception — les ordres d'achat
+/// réels ne sont pas noyés sous des micro-lots hebdomadaires.
+fn apply_dividend(out: &mut ReplayOutput, tx: &EngineTx) {
+    let (Some(instrument_id), Some(qty), Some(price)) =
+        (tx.instrument_id, tx.quantity, tx.unit_price)
+    else {
+        return; // dividende en numéraire
+    };
+    if qty.is_zero() {
+        return;
+    }
+    if let Some(lot) = out.lots.iter_mut().find(|l| {
+        l.instrument_id == instrument_id && l.account_id == tx.account_id && l.income_events > 0
+    }) {
+        // Une vente a pu consommer une partie des versements précédents : le
+        // nouveau PRU doit porter sur la quantité encore détenue, pas sur la
+        // quantité historique déjà partiellement cédée.
+        let remaining_cost = lot.remaining_quantity * lot.unit_cost;
+        lot.initial_quantity += qty;
+        lot.remaining_quantity += qty;
+        lot.unit_cost = (remaining_cost + qty * price) / lot.remaining_quantity;
+        lot.income_events += 1;
+    } else {
+        let id = out.lots.len();
+        out.lots.push(Lot {
+            id,
+            buy_tx_id: None,
+            instrument_id,
+            account_id: tx.account_id,
+            origin_broker: tx.broker.clone(),
+            acquisition_date: tx.date,
+            initial_quantity: qty,
+            remaining_quantity: qty,
+            unit_cost: price,
+            fees: Decimal::ZERO,
+            unreconciled: false,
+            income_events: 1,
+        });
+    }
 }
 
 /// Indices des lots ouverts pour un instrument, en ordre FIFO
@@ -130,17 +189,23 @@ fn open_lots_fifo(lots: &[Lot], instrument_id: i64, account_id: Option<i64>) -> 
         .filter(|(_, l)| {
             l.instrument_id == instrument_id
                 && !l.remaining_quantity.is_zero()
-                && account_id.map_or(true, |a| l.account_id == a)
+                && account_id.is_none_or(|a| l.account_id == a)
         })
         .map(|(i, _)| i)
         .collect();
-    idx.sort_by_key(|&i| (lots[i].acquisition_date.unwrap_or(NaiveDate::MIN), lots[i].id));
+    idx.sort_by_key(|&i| {
+        (
+            lots[i].acquisition_date.unwrap_or(NaiveDate::MIN),
+            lots[i].id,
+        )
+    });
     idx
 }
 
 fn apply_sell(out: &mut ReplayOutput, tx: &EngineTx) {
     let (Some(instrument_id), Some(qty)) = (tx.instrument_id, tx.quantity) else {
-        out.warnings.push(format!("SELL tx#{} incomplet, ignoré", tx.id));
+        out.warnings
+            .push(format!("SELL tx#{} incomplet, ignoré", tx.id));
         return;
     };
     let price = tx.unit_price.unwrap_or(Decimal::ZERO);
@@ -153,7 +218,12 @@ fn apply_sell(out: &mut ReplayOutput, tx: &EngineTx) {
         let lot = &mut out.lots[i];
         let take = to_sell.min(lot.remaining_quantity);
         let cost_basis = take * lot.unit_cost + lot.fees_for(take);
-        let proceeds = take * price - if qty.is_zero() { Decimal::ZERO } else { tx.fees * take / qty };
+        let proceeds = take * price
+            - if qty.is_zero() {
+                Decimal::ZERO
+            } else {
+                tx.fees * take / qty
+            };
         lot.remaining_quantity -= take;
         to_sell -= take;
         out.disposals.push(Disposal {
@@ -181,7 +251,8 @@ fn apply_sell(out: &mut ReplayOutput, tx: &EngineTx) {
 /// est importé (nouveau replay).
 fn apply_transfer_in(out: &mut ReplayOutput, tx: &EngineTx) {
     let (Some(instrument_id), Some(qty)) = (tx.instrument_id, tx.quantity) else {
-        out.warnings.push(format!("TRANSFER_IN tx#{} incomplet, ignoré", tx.id));
+        out.warnings
+            .push(format!("TRANSFER_IN tx#{} incomplet, ignoré", tx.id));
         return;
     };
     let mut to_move = qty;
@@ -206,12 +277,13 @@ fn apply_transfer_in(out: &mut ReplayOutput, tx: &EngineTx) {
             lot.remaining_quantity -= moved;
             lot.initial_quantity -= moved;
             lot.fees -= fees_moved;
-            let (buy_tx_id, date, unit_cost, broker, unreconciled) = (
+            let (buy_tx_id, date, unit_cost, broker, unreconciled, income_events) = (
                 lot.buy_tx_id,
                 lot.acquisition_date,
                 lot.unit_cost,
                 lot.origin_broker.clone(),
                 lot.unreconciled,
+                lot.income_events,
             );
             let id = out.lots.len();
             out.lots.push(Lot {
@@ -226,6 +298,7 @@ fn apply_transfer_in(out: &mut ReplayOutput, tx: &EngineTx) {
                 unit_cost,
                 fees: fees_moved,
                 unreconciled,
+                income_events,
             });
             to_move = Decimal::ZERO;
         }
@@ -249,6 +322,7 @@ fn apply_transfer_in(out: &mut ReplayOutput, tx: &EngineTx) {
             unit_cost: tx.unit_price.unwrap_or(Decimal::ZERO),
             fees: Decimal::ZERO,
             unreconciled: true,
+            income_events: 0,
         });
     }
 }
@@ -257,14 +331,20 @@ fn apply_transfer_in(out: &mut ReplayOutput, tx: &EngineTx) {
 /// Quantités multipliées, coût unitaire divisé, coût total du lot invariant.
 fn apply_split(out: &mut ReplayOutput, tx: &EngineTx) {
     let (Some(instrument_id), Some(ratio)) = (tx.instrument_id, tx.quantity) else {
-        out.warnings.push(format!("SPLIT tx#{} sans ratio, ignoré", tx.id));
+        out.warnings
+            .push(format!("SPLIT tx#{} sans ratio, ignoré", tx.id));
         return;
     };
     if ratio.is_zero() {
-        out.warnings.push(format!("SPLIT tx#{} avec ratio nul, ignoré", tx.id));
+        out.warnings
+            .push(format!("SPLIT tx#{} avec ratio nul, ignoré", tx.id));
         return;
     }
-    for lot in out.lots.iter_mut().filter(|l| l.instrument_id == instrument_id) {
+    for lot in out
+        .lots
+        .iter_mut()
+        .filter(|l| l.instrument_id == instrument_id)
+    {
         lot.initial_quantity *= ratio;
         lot.remaining_quantity *= ratio;
         lot.unit_cost /= ratio;
@@ -284,7 +364,11 @@ mod tests {
         EngineTx {
             id,
             account_id: account,
-            broker: if account == 1 { "BoursoBank".into() } else { "Bourse Direct".into() },
+            broker: if account == 1 {
+                "BoursoBank".into()
+            } else {
+                "Bourse Direct".into()
+            },
             date: Some(d(date)),
             tx_type: t,
             instrument_id: Some(10),
@@ -401,5 +485,44 @@ mod tests {
         assert_eq!(out.disposals[0].cost_basis, dec!(101));
         // Coût de la portion restante : 5*20 + 1 = 101
         assert_eq!(out.lots[0].invested_remaining(), dec!(101));
+    }
+
+    #[test]
+    fn in_kind_dividends_are_aggregated_at_weighted_cost() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Dividend, "2", "10"),
+            tx(2, 1, "2024-02-10", TxType::Dividend, "3", "20"),
+        ]);
+
+        assert_eq!(out.lots.len(), 1);
+        assert_eq!(out.lots[0].remaining_quantity, dec!(5));
+        assert_eq!(out.lots[0].unit_cost, dec!(16));
+        assert_eq!(out.lots[0].income_events, 2);
+    }
+
+    #[test]
+    fn cash_dividend_does_not_create_a_lot() {
+        let mut dividend = tx(1, 1, "2024-01-10", TxType::Dividend, "1", "10");
+        dividend.quantity = None;
+        dividend.unit_price = None;
+
+        let out = replay(&[dividend]);
+
+        assert!(out.lots.is_empty());
+    }
+
+    #[test]
+    fn staking_cost_stays_correct_after_a_sale_between_rewards() {
+        let out = replay(&[
+            tx(1, 1, "2024-01-10", TxType::Dividend, "2", "10"),
+            tx(2, 1, "2024-01-20", TxType::Sell, "1", "30"),
+            tx(3, 1, "2024-02-10", TxType::Dividend, "3", "20"),
+        ]);
+
+        assert_eq!(out.lots[0].initial_quantity, dec!(5));
+        assert_eq!(out.lots[0].remaining_quantity, dec!(4));
+        assert_eq!(out.lots[0].unit_cost, dec!(17.5));
+        assert_eq!(out.lots[0].invested_remaining(), dec!(70));
+        assert_eq!(out.disposals[0].cost_basis, dec!(10));
     }
 }

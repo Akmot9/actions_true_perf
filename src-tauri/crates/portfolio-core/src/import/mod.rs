@@ -32,8 +32,14 @@ pub enum ImportError {
 
 /// Détecte le format via les en-têtes et parse le contenu.
 pub fn parse_any(content: &str) -> Result<ParsedFile, ImportError> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(content.as_bytes());
-    let headers: Vec<String> = reader.headers()?.iter().map(|h| h.trim().to_string()).collect();
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(content.as_bytes());
+    let headers: Vec<String> = reader
+        .headers()?
+        .iter()
+        .map(|h| h.trim().to_string())
+        .collect();
 
     if bourse_direct::detect(&headers) {
         bourse_direct::parse(content)
@@ -55,7 +61,9 @@ pub struct FingerprintBuilder {
 
 impl FingerprintBuilder {
     pub fn new() -> Self {
-        Self { seen: HashMap::new() }
+        Self {
+            seen: HashMap::new(),
+        }
     }
 
     pub fn fingerprint(&mut self, parts: &[&str]) -> String {
@@ -77,7 +85,7 @@ impl Default for FingerprintBuilder {
 }
 
 pub(crate) fn parse_decimal(s: &str) -> Option<Decimal> {
-    let cleaned = s.trim().replace('\u{a0}', "").replace(' ', "").replace(',', ".");
+    let cleaned = s.trim().replace(['\u{a0}', ' '], "").replace(',', ".");
     if cleaned.is_empty() {
         return None;
     }
@@ -93,7 +101,10 @@ mod tests {
         let mut f1 = FingerprintBuilder::new();
         let a1 = f1.fingerprint(&["BD", "2025-01-01", "BUY", "NXI.PA", "10", "9.6"]);
         let a2 = f1.fingerprint(&["BD", "2025-01-01", "BUY", "NXI.PA", "10", "9.6"]);
-        assert_ne!(a1, a2, "deux ordres identiques le même jour restent distincts");
+        assert_ne!(
+            a1, a2,
+            "deux ordres identiques le même jour restent distincts"
+        );
 
         let mut f2 = FingerprintBuilder::new();
         let b1 = f2.fingerprint(&["BD", "2025-01-01", "BUY", "NXI.PA", "10", "9.6"]);

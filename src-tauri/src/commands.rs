@@ -2,7 +2,7 @@ use chrono::NaiveDate;
 use portfolio_core::import::parse_any;
 use portfolio_core::replay;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -29,19 +29,28 @@ pub struct ImportReport {
 }
 
 #[tauri::command]
-pub fn import_csv(state: State<AppState>, file_name: String, content: String) -> Result<ImportReport, String> {
+pub fn import_csv(
+    state: State<AppState>,
+    file_name: String,
+    content: String,
+) -> Result<ImportReport, String> {
     let conn = state.conn.lock().unwrap();
     do_import(&conn, &file_name, &content)
 }
 
-pub fn do_import(conn: &rusqlite::Connection, file_name: &str, content: &str) -> Result<ImportReport, String> {
+pub fn do_import(
+    conn: &rusqlite::Connection,
+    file_name: &str,
+    content: &str,
+) -> Result<ImportReport, String> {
     let parsed = parse_any(content).map_err(|e| e.to_string())?;
     let file_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
 
-    let account_id =
-        db::get_or_create_account(conn, &parsed.broker, &parsed.account_type).map_err(|e| e.to_string())?;
+    let account_id = db::get_or_create_account(conn, &parsed.broker, &parsed.account_type)
+        .map_err(|e| e.to_string())?;
     let (file_id, file_already_imported) =
-        db::record_import_file(conn, file_name, &file_hash, &parsed.broker, content).map_err(|e| e.to_string())?;
+        db::record_import_file(conn, file_name, &file_hash, &parsed.broker, content)
+            .map_err(|e| e.to_string())?;
 
     let mut inserted = 0;
     let mut duplicates = 0;
@@ -54,7 +63,9 @@ pub fn do_import(conn: &rusqlite::Connection, file_name: &str, content: &str) ->
             ),
             None => None,
         };
-        if db::insert_transaction(conn, account_id, instrument_id, file_id, t).map_err(|e| e.to_string())? {
+        if db::insert_transaction(conn, account_id, instrument_id, file_id, t)
+            .map_err(|e| e.to_string())?
+        {
             inserted += 1;
         } else {
             duplicates += 1;
@@ -72,13 +83,19 @@ pub fn do_import(conn: &rusqlite::Connection, file_name: &str, content: &str) ->
     for t in &parsed.transactions {
         if let Some(i) = &t.instrument {
             if i.symbol.is_none() {
-                warnings.push(format!("instrument non reconnu : « {} » (ligne {})", i.name, t.row));
+                warnings.push(format!(
+                    "instrument non reconnu : « {} » (ligne {})",
+                    i.name, t.row
+                ));
             }
         }
     }
 
-    let mut by_type: Vec<(String, usize)> = by_type.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    by_type.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut by_type: Vec<(String, usize)> = by_type
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    by_type.sort_by_key(|item| std::cmp::Reverse(item.1));
 
     Ok(ImportReport {
         file_name: file_name.to_string(),
@@ -99,6 +116,7 @@ pub struct LotView {
     /// rapproché) : c'est elle qui est éditable.
     pub tx_id: Option<i64>,
     pub edited: bool,
+    pub manual: bool,
     pub acquisition_date: Option<NaiveDate>,
     pub origin_broker: String,
     pub account: String,
@@ -111,6 +129,7 @@ pub struct LotView {
     pub pnl: Option<Decimal>,
     pub pnl_pct: Option<Decimal>,
     pub unreconciled: bool,
+    pub income_events: u32,
 }
 
 #[derive(Serialize)]
@@ -133,6 +152,7 @@ pub struct PositionView {
 
 #[derive(Serialize)]
 pub struct PortfolioView {
+    pub has_demo_data: bool,
     pub positions: Vec<PositionView>,
     pub total_invested: Decimal,
     pub total_market_value: Decimal,
@@ -162,12 +182,15 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
     let quotes = db::load_quotes(conn).map_err(|e| e.to_string())?;
     let dividends = db::load_dividends(conn).map_err(|e| e.to_string())?;
     let edited_ids = db::load_edited_ids(conn).map_err(|e| e.to_string())?;
+    let manual_ids = db::load_manual_ids(conn).map_err(|e| e.to_string())?;
 
     let out = replay(&txs);
 
     let mut accounts: HashMap<i64, String> = HashMap::new();
     for t in &txs {
-        accounts.entry(t.account_id).or_insert_with(|| t.broker.clone());
+        accounts
+            .entry(t.account_id)
+            .or_insert_with(|| t.broker.clone());
     }
 
     let mut realized_by_instrument: HashMap<i64, Decimal> = HashMap::new();
@@ -178,7 +201,10 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
 
     let mut by_instrument: HashMap<i64, Vec<&portfolio_core::Lot>> = HashMap::new();
     for lot in out.lots.iter().filter(|l| !l.remaining_quantity.is_zero()) {
-        by_instrument.entry(lot.instrument_id).or_default().push(lot);
+        by_instrument
+            .entry(lot.instrument_id)
+            .or_default()
+            .push(lot);
     }
 
     let mut positions = Vec::new();
@@ -205,10 +231,12 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
             if lot.unreconciled {
                 unreconciled_quantity += lot.remaining_quantity;
             }
+            let manual = lot.buy_tx_id.is_some_and(|id| manual_ids.contains(&id));
             lot_views.push(LotView {
                 id: lot.id,
                 tx_id: lot.buy_tx_id,
-                edited: lot.buy_tx_id.is_some_and(|id| edited_ids.contains(&id)),
+                edited: !manual && lot.buy_tx_id.is_some_and(|id| edited_ids.contains(&id)),
+                manual,
                 acquisition_date: lot.acquisition_date,
                 origin_broker: lot.origin_broker.clone(),
                 account: accounts.get(&lot.account_id).cloned().unwrap_or_default(),
@@ -221,6 +249,7 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
                 pnl: lot_pnl.map(|p| p.round_dp(2)),
                 pnl_pct: lot_pnl.and_then(|p| pct(p, lot_invested)),
                 unreconciled: lot.unreconciled,
+                income_events: lot.income_events,
             });
         }
 
@@ -229,15 +258,25 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
         positions.push(PositionView {
             instrument_id,
             symbol,
-            name: inst.map(|i| i.name.clone()).unwrap_or_else(|| format!("instrument #{instrument_id}")),
+            name: inst
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| format!("instrument #{instrument_id}")),
             quantity,
             invested: invested.round_dp(2),
-            avg_cost: if quantity.is_zero() { None } else { Some((invested / quantity).round_dp(4)) },
+            avg_cost: if quantity.is_zero() {
+                None
+            } else {
+                Some((invested / quantity).round_dp(4))
+            },
             market_value: has_quote.then(|| market_value.round_dp(2)),
             pnl: pnl.map(|p| p.round_dp(2)),
             pnl_pct: pnl.and_then(|p| pct(p, invested)),
             dividends: dividends.get(&instrument_id).copied().unwrap_or_default(),
-            realized_pnl: realized_by_instrument.get(&instrument_id).copied().unwrap_or_default().round_dp(2),
+            realized_pnl: realized_by_instrument
+                .get(&instrument_id)
+                .copied()
+                .unwrap_or_default()
+                .round_dp(2),
             quote,
             unreconciled_quantity,
             lots: lot_views,
@@ -253,11 +292,18 @@ pub fn build_portfolio(conn: &rusqlite::Connection) -> Result<PortfolioView, Str
     let total_invested: Decimal = positions.iter().map(|p| p.invested).sum();
     let total_market_value: Decimal = positions.iter().filter_map(|p| p.market_value).sum();
     let total_pnl: Decimal = positions.iter().filter_map(|p| p.pnl).sum();
-    let total_dividends: Decimal = positions.iter().map(|p| p.dividends).sum();
-    let total_realized_pnl: Decimal =
-        realized_by_instrument.values().copied().sum::<Decimal>().round_dp(2);
+    // Les revenus restent acquis même si la dernière part de l'instrument a
+    // été vendue : le total ne doit donc pas dépendre des seules positions
+    // encore ouvertes.
+    let total_dividends: Decimal = dividends.values().copied().sum();
+    let total_realized_pnl: Decimal = realized_by_instrument
+        .values()
+        .copied()
+        .sum::<Decimal>()
+        .round_dp(2);
 
     Ok(PortfolioView {
+        has_demo_data: db::has_demo_data(conn).map_err(|e| e.to_string())?,
         positions,
         total_invested: total_invested.round_dp(2),
         total_market_value: total_market_value.round_dp(2),
@@ -273,6 +319,199 @@ fn parse_dec(value: &str, label: &str) -> Result<Decimal, String> {
         .map_err(|_| format!("{label} invalide : « {value} »"))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ManualTransactionInput {
+    pub operation: String,
+    pub date: String,
+    pub instrument_name: String,
+    pub symbol: Option<String>,
+    pub broker: String,
+    pub account_type: String,
+    pub quantity: Option<String>,
+    pub unit_price: Option<String>,
+    pub fees: String,
+    pub amount: Option<String>,
+}
+
+struct ValidatedManualTransaction {
+    date: NaiveDate,
+    tx_type: &'static str,
+    operation_label: &'static str,
+    instrument_name: String,
+    symbol: Option<String>,
+    broker: String,
+    account_type: String,
+    quantity: Option<Decimal>,
+    unit_price: Option<Decimal>,
+    fees: Decimal,
+    amount: Option<Decimal>,
+}
+
+fn optional_dec(value: Option<String>, label: &str) -> Result<Option<Decimal>, String> {
+    value
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| parse_dec(&v, label))
+        .transpose()
+}
+
+fn validate_manual_transaction(
+    input: ManualTransactionInput,
+) -> Result<ValidatedManualTransaction, String> {
+    let date = NaiveDate::parse_from_str(input.date.trim(), "%Y-%m-%d")
+        .map_err(|_| format!("date invalide : « {} »", input.date))?;
+    let instrument_name = input.instrument_name.trim().to_string();
+    if instrument_name.is_empty() {
+        return Err("le nom de l'instrument est obligatoire".to_string());
+    }
+    let broker = input.broker.trim().to_string();
+    if broker.is_empty() {
+        return Err("le courtier ou le compte est obligatoire".to_string());
+    }
+    let account_type = input.account_type.trim().to_string();
+    if account_type.is_empty() {
+        return Err("le type de compte est obligatoire".to_string());
+    }
+    let symbol = input
+        .symbol
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty());
+    let fees = if input.fees.trim().is_empty() {
+        Decimal::ZERO
+    } else {
+        parse_dec(&input.fees, "frais")?
+    };
+    if fees < Decimal::ZERO {
+        return Err("les frais ne peuvent pas être négatifs".to_string());
+    }
+
+    let quantity = optional_dec(input.quantity, "quantité")?;
+    let unit_price = optional_dec(input.unit_price, "prix")?;
+    let amount = optional_dec(input.amount, "montant")?;
+    let operation = input.operation.trim().to_uppercase();
+    let (tx_type, operation_label, quantity, unit_price, amount) = match operation.as_str() {
+        "BUY" | "SELL" | "STAKING" => {
+            let quantity = quantity
+                .filter(|q| *q > Decimal::ZERO)
+                .ok_or_else(|| "la quantité doit être strictement positive".to_string())?;
+            let unit_price = unit_price
+                .filter(|p| *p >= Decimal::ZERO)
+                .ok_or_else(|| "le prix ne peut pas être négatif ou vide".to_string())?;
+            let (tx_type, label) = match operation.as_str() {
+                "BUY" => ("BUY", "Achat manuel"),
+                "SELL" => ("SELL", "Vente manuelle"),
+                _ => ("DIVIDEND", "Staking manuel"),
+            };
+            (tx_type, label, Some(quantity), Some(unit_price), None)
+        }
+        "DIVIDEND" => {
+            let amount = amount
+                .filter(|a| *a > Decimal::ZERO)
+                .ok_or_else(|| "le montant doit être strictement positif".to_string())?;
+            ("DIVIDEND", "Dividende manuel", None, None, Some(amount))
+        }
+        _ => {
+            return Err(format!(
+                "type d'opération non pris en charge : « {} »",
+                input.operation
+            ));
+        }
+    };
+
+    Ok(ValidatedManualTransaction {
+        date,
+        tx_type,
+        operation_label,
+        instrument_name,
+        symbol,
+        broker,
+        account_type,
+        quantity,
+        unit_price,
+        fees,
+        amount,
+    })
+}
+
+fn save_manual_transaction(
+    conn: &rusqlite::Connection,
+    id: Option<i64>,
+    input: ManualTransactionInput,
+) -> Result<i64, String> {
+    let input = validate_manual_transaction(input)?;
+    let account_id = db::get_or_create_account(conn, &input.broker, &input.account_type)
+        .map_err(|e| e.to_string())?;
+    let instrument_id =
+        db::get_or_create_instrument(conn, input.symbol.as_deref(), None, &input.instrument_name)
+            .map_err(|e| e.to_string())?;
+    let description = format!("[MANUEL] {}", input.operation_label);
+
+    if let Some(id) = id {
+        db::update_manual_transaction(
+            conn,
+            id,
+            account_id,
+            instrument_id,
+            input.date,
+            input.tx_type,
+            input.quantity.as_ref(),
+            input.unit_price.as_ref(),
+            &input.fees,
+            input.amount.as_ref(),
+            &description,
+        )
+        .map_err(|_| "ligne manuelle introuvable ou protégée".to_string())?;
+        Ok(id)
+    } else {
+        db::insert_manual_transaction(
+            conn,
+            account_id,
+            instrument_id,
+            input.date,
+            input.tx_type,
+            input.quantity.as_ref(),
+            input.unit_price.as_ref(),
+            &input.fees,
+            input.amount.as_ref(),
+            &description,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+pub fn add_manual_transaction(
+    state: State<AppState>,
+    input: ManualTransactionInput,
+) -> Result<i64, String> {
+    let conn = state.conn.lock().unwrap();
+    save_manual_transaction(&conn, None, input)
+}
+
+#[tauri::command]
+pub fn update_manual_transaction(
+    state: State<AppState>,
+    id: i64,
+    input: ManualTransactionInput,
+) -> Result<i64, String> {
+    let conn = state.conn.lock().unwrap();
+    save_manual_transaction(&conn, Some(id), input)
+}
+
+#[tauri::command]
+pub fn get_manual_transactions(
+    state: State<AppState>,
+) -> Result<Vec<db::ManualTransactionRow>, String> {
+    let conn = state.conn.lock().unwrap();
+    db::load_manual_transactions(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_manual_transaction(state: State<AppState>, id: i64) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    db::delete_manual_transaction(&conn, id)
+        .map_err(|_| "ligne manuelle introuvable ou protégée".to_string())
+}
+
 #[tauri::command]
 pub fn update_transaction(
     state: State<AppState>,
@@ -285,7 +524,8 @@ pub fn update_transaction(
     let date = match date.as_deref().map(str::trim) {
         None | Some("") => None,
         Some(d) => Some(
-            NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| format!("date invalide : « {d} »"))?,
+            NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .map_err(|_| format!("date invalide : « {d} »"))?,
         ),
     };
     let quantity = parse_dec(&quantity, "quantité")?;
@@ -302,13 +542,20 @@ pub fn update_transaction(
     }
 
     let conn = state.conn.lock().unwrap();
-    db::update_transaction(&conn, id, date, &quantity, &unit_price, &fees).map_err(|e| e.to_string())
+    db::update_transaction(&conn, id, date, &quantity, &unit_price, &fees)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn revert_transaction(state: State<AppState>, id: i64) -> Result<(), String> {
     let conn = state.conn.lock().unwrap();
     db::revert_transaction(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_demo_data(state: State<AppState>) -> Result<(), String> {
+    let conn = state.conn.lock().unwrap();
+    db::delete_demo_data(&conn).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -330,7 +577,11 @@ pub async fn refresh_quotes(state: State<'_, AppState>) -> Result<Vec<QuoteRefre
             .lots
             .iter()
             .filter(|l| !l.remaining_quantity.is_zero())
-            .filter_map(|l| instruments.get(&l.instrument_id).and_then(|i| i.symbol.clone()))
+            .filter_map(|l| {
+                instruments
+                    .get(&l.instrument_id)
+                    .and_then(|i| i.symbol.clone())
+            })
             .collect();
         symbols.sort();
         symbols.dedup();
@@ -345,9 +596,17 @@ pub async fn refresh_quotes(state: State<'_, AppState>) -> Result<Vec<QuoteRefre
         match r.result {
             Ok(price) => {
                 db::upsert_quote(&conn, &r.symbol, &price, "yahoo").map_err(|e| e.to_string())?;
-                report.push(QuoteRefresh { symbol: r.symbol, price: Some(price), error: None });
+                report.push(QuoteRefresh {
+                    symbol: r.symbol,
+                    price: Some(price),
+                    error: None,
+                });
             }
-            Err(e) => report.push(QuoteRefresh { symbol: r.symbol, price: None, error: Some(e) }),
+            Err(e) => report.push(QuoteRefresh {
+                symbol: r.symbol,
+                price: None,
+                error: Some(e),
+            }),
         }
     }
     Ok(report)

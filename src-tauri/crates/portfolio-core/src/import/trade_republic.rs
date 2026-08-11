@@ -21,10 +21,30 @@ pub fn detect(headers: &[String]) -> bool {
 }
 
 pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(content.as_bytes());
-    let headers: Vec<String> = reader.headers()?.iter().map(|h| h.trim().to_string()).collect();
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(content.as_bytes());
+    let headers: Vec<String> = reader
+        .headers()?
+        .iter()
+        .map(|h| h.trim().to_string())
+        .collect();
     let col = |name: &str| headers.iter().position(|h| h == name);
-    let (c_date, c_category, c_type, c_asset, c_name, c_symbol, c_shares, c_price, c_amount, c_fee, c_tax, c_desc, c_txid) = (
+    let (
+        c_date,
+        c_category,
+        c_type,
+        c_asset,
+        c_name,
+        c_symbol,
+        c_shares,
+        c_price,
+        c_amount,
+        c_fee,
+        c_tax,
+        c_desc,
+        c_txid,
+    ) = (
         col("date"),
         col("category"),
         col("type"),
@@ -47,7 +67,12 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
     for (i, record) in reader.records().enumerate() {
         let record = record?;
         let row = i + 2;
-        let field = |c: Option<usize>| c.and_then(|c| record.get(c)).unwrap_or("").trim().to_string();
+        let field = |c: Option<usize>| {
+            c.and_then(|c| record.get(c))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
 
         let date_s = field(c_date);
         if date_s.is_empty() {
@@ -68,8 +93,12 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
         let amount = parse_decimal(&field(c_amount));
         // Frais et taxes (TTF) apparaissent en négatif ; ils font partie du
         // coût d'acquisition et sont regroupés dans `fees`.
-        let fees = parse_decimal(&field(c_fee)).map(|d| d.abs()).unwrap_or(Decimal::ZERO)
-            + parse_decimal(&field(c_tax)).map(|d| d.abs()).unwrap_or(Decimal::ZERO);
+        let fees = parse_decimal(&field(c_fee))
+            .map(|d| d.abs())
+            .unwrap_or(Decimal::ZERO)
+            + parse_decimal(&field(c_tax))
+                .map(|d| d.abs())
+                .unwrap_or(Decimal::ZERO);
 
         let instrument = if symbol.is_empty() {
             None
@@ -79,15 +108,23 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
             Some(resolve_isin(&symbol, &name))
         };
 
-        let (tx_type, instrument, quantity, unit_price) = match (category.as_str(), ttype.as_str()) {
+        let (tx_type, instrument, quantity, unit_price) = match (category.as_str(), ttype.as_str())
+        {
             ("TRADING", "BUY") => (TxType::Buy, instrument, shares, price),
             ("TRADING", "SELL") => (TxType::Sell, instrument, shares, price),
-            // Titres reçus gratuitement (récompenses crypto…) : lot au prix
-            // de marché du jour de réception, rien de déboursé.
-            ("DELIVERY", "FREE_RECEIPT") => (TxType::Buy, instrument, shares, price.or(Some(Decimal::ZERO))),
+            // Récompenses de staking versées en crypto : dividende en nature,
+            // valorisé au prix de marché du jour de réception.
+            ("DELIVERY", "FREE_RECEIPT") => (
+                TxType::Dividend,
+                instrument,
+                shares,
+                price.or(Some(Decimal::ZERO)),
+            ),
             // Attribution gratuite d'actions : lot à coût nul, le coût total
             // de la position est inchangé.
-            ("CORPORATE_ACTION", "BONUS_ISSUE") => (TxType::Buy, instrument, shares, Some(Decimal::ZERO)),
+            ("CORPORATE_ACTION", "BONUS_ISSUE") => {
+                (TxType::Buy, instrument, shares, Some(Decimal::ZERO))
+            }
             ("CASH", "DIVIDEND") => (TxType::Dividend, instrument, None, None),
             // Les achats sur le marché privé apparaissent deux fois (ligne
             // CASH + ligne TRADING) : seule la ligne TRADING crée le lot.
@@ -102,7 +139,15 @@ pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
 
         let transaction_id = field(c_txid);
         let fingerprint = if transaction_id.is_empty() {
-            fp.fingerprint(&[BROKER, &date_s, &category, &ttype, &name, &field(c_shares), &field(c_amount)])
+            fp.fingerprint(&[
+                BROKER,
+                &date_s,
+                &category,
+                &ttype,
+                &name,
+                &field(c_shares),
+                &field(c_amount),
+            ])
         } else {
             fp.fingerprint(&[BROKER, &transaction_id])
         };
@@ -155,8 +200,10 @@ mod tests {
 
     #[test]
     fn detects_headers() {
-        let headers: Vec<String> =
-            ["date", "category", "type", "asset_class", "transaction_id"].iter().map(|s| s.to_string()).collect();
+        let headers: Vec<String> = ["date", "category", "type", "asset_class", "transaction_id"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(detect(&headers));
     }
 
@@ -170,7 +217,7 @@ mod tests {
             vec![
                 TxType::Buy,
                 TxType::Sell,
-                TxType::Buy,      // FREE_RECEIPT => lot au prix de marché
+                TxType::Dividend, // FREE_RECEIPT => staking au prix de marché
                 TxType::Buy,      // BONUS_ISSUE => lot à coût nul
                 TxType::Dividend,
                 TxType::Cash,
@@ -186,6 +233,10 @@ mod tests {
         assert_eq!(buy.fees, dec!(0.01));
         // Achat fractionné.
         assert_eq!(buy.quantity, Some(dec!(0.0198550000)));
+        // Le staking conserve quantité et valeur de réception.
+        let staking = &parsed.transactions[2];
+        assert_eq!(staking.quantity, Some(dec!(0.0000020000)));
+        assert_eq!(staking.unit_price, Some(dec!(2488.4600000000)));
     }
 
     #[test]
@@ -193,7 +244,10 @@ mod tests {
         let parsed = parse(SAMPLE).unwrap();
         let sell = &parsed.transactions[1];
         assert_eq!(sell.quantity, Some(dec!(0.0000130000)));
-        assert_eq!(sell.instrument.as_ref().unwrap().symbol.as_deref(), Some("BTC-EUR"));
+        assert_eq!(
+            sell.instrument.as_ref().unwrap().symbol.as_deref(),
+            Some("BTC-EUR")
+        );
     }
 
     #[test]
@@ -214,9 +268,15 @@ mod tests {
     fn fingerprints_use_transaction_id() {
         let p1 = parse(SAMPLE).unwrap();
         let p2 = parse(SAMPLE).unwrap();
-        assert_eq!(p1.transactions[0].fingerprint, p2.transactions[0].fingerprint);
-        let unique: std::collections::HashSet<_> =
-            p1.transactions.iter().map(|t| t.fingerprint.clone()).collect();
+        assert_eq!(
+            p1.transactions[0].fingerprint,
+            p2.transactions[0].fingerprint
+        );
+        let unique: std::collections::HashSet<_> = p1
+            .transactions
+            .iter()
+            .map(|t| t.fingerprint.clone())
+            .collect();
         assert_eq!(unique.len(), p1.transactions.len());
     }
 }

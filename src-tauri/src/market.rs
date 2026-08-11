@@ -21,14 +21,20 @@ pub async fn fetch_quotes(symbols: &[String]) -> Vec<QuoteResult> {
         Err(e) => {
             return symbols
                 .iter()
-                .map(|s| QuoteResult { symbol: s.clone(), result: Err(e.to_string()) })
+                .map(|s| QuoteResult {
+                    symbol: s.clone(),
+                    result: Err(e.to_string()),
+                })
                 .collect()
         }
     };
 
     let mut results = Vec::new();
     for symbol in symbols {
-        results.push(QuoteResult { symbol: symbol.clone(), result: fetch_one(&client, symbol).await });
+        results.push(QuoteResult {
+            symbol: symbol.clone(),
+            result: fetch_one(&client, symbol).await,
+        });
     }
     results
 }

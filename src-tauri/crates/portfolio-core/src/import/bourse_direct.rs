@@ -21,7 +21,9 @@ pub fn detect(headers: &[String]) -> bool {
 }
 
 pub fn parse(content: &str) -> Result<ParsedFile, ImportError> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(content.as_bytes());
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(content.as_bytes());
     let mut txs = Vec::new();
     let mut warnings = Vec::new();
     let mut fp = FingerprintBuilder::new();
@@ -91,7 +93,14 @@ fn classify(
     debit: Option<Decimal>,
     row: usize,
     warnings: &mut Vec<String>,
-) -> (TxType, Option<InstrumentRef>, Option<Decimal>, Option<Decimal>, Decimal, Option<Decimal>) {
+) -> (
+    TxType,
+    Option<InstrumentRef>,
+    Option<Decimal>,
+    Option<Decimal>,
+    Decimal,
+    Option<Decimal>,
+) {
     let cash_amount = credit.unwrap_or(Decimal::ZERO) - debit.unwrap_or(Decimal::ZERO);
     let instr = |rest: &str| Some(resolve_label(rest));
 
@@ -99,7 +108,14 @@ fn classify(
         // Transfert de titres entre courtiers : surtout pas un achat.
         // Le cours indiqué est le PRU calculé par le courtier, conservé comme
         // valeur de repli pour les quantités sans historique.
-        return (TxType::TransferIn, instr(rest), qty, price, Decimal::ZERO, None);
+        return (
+            TxType::TransferIn,
+            instr(rest),
+            qty,
+            price,
+            Decimal::ZERO,
+            None,
+        );
     }
     if let Some(rest) = label.strip_prefix("ACH CPT ") {
         // Frais = débit total - quantité x cours.
@@ -107,7 +123,14 @@ fn classify(
             (Some(q), Some(p), Some(d)) => (d - q * p).max(Decimal::ZERO),
             _ => Decimal::ZERO,
         };
-        return (TxType::Buy, instr(rest), qty, price, fees, debit.map(|d| -d));
+        return (
+            TxType::Buy,
+            instr(rest),
+            qty,
+            price,
+            fees,
+            debit.map(|d| -d),
+        );
     }
     if let Some(rest) = label.strip_prefix("VTE CPT ") {
         let fees = match (qty, price, credit) {
@@ -117,7 +140,14 @@ fn classify(
         return (TxType::Sell, instr(rest), qty, price, fees, credit);
     }
     if let Some(rest) = label.strip_prefix("COUPONS ") {
-        return (TxType::Dividend, instr(rest), None, None, Decimal::ZERO, credit);
+        return (
+            TxType::Dividend,
+            instr(rest),
+            None,
+            None,
+            Decimal::ZERO,
+            credit,
+        );
     }
     if let Some(rest) = label.strip_prefix("INDEMNISATION ") {
         // OST : retrait forcé de titres contre indemnité (ex: Atos).
@@ -125,11 +155,28 @@ fn classify(
         // lots avec la moins-value réalisée correspondante.
         if let Some(q) = qty {
             if q < Decimal::ZERO {
-                warnings.push(format!("ligne {row}: OST « {label} » traitée comme cession de {} titres", -q));
-                return (TxType::Sell, instr(rest), Some(-q), price, Decimal::ZERO, None);
+                warnings.push(format!(
+                    "ligne {row}: OST « {label} » traitée comme cession de {} titres",
+                    -q
+                ));
+                return (
+                    TxType::Sell,
+                    instr(rest),
+                    Some(-q),
+                    price,
+                    Decimal::ZERO,
+                    None,
+                );
             }
         }
-        return (TxType::Other, instr(rest), qty, price, Decimal::ZERO, Some(cash_amount));
+        return (
+            TxType::Other,
+            instr(rest),
+            qty,
+            price,
+            Decimal::ZERO,
+            Some(cash_amount),
+        );
     }
     if label.starts_with("TRANSFERT VALEUR ") {
         // Changement de ligne interne (ex: passage AIR LIQUIDE -> PF28) :
@@ -139,20 +186,50 @@ fn classify(
     }
     if let Some(rest) = label.strip_prefix("ROMPU ") {
         // Vente de rompus lors d'une OST : espèces reçues, quantité inconnue.
-        return (TxType::Other, instr(rest), None, price, Decimal::ZERO, credit);
+        return (
+            TxType::Other,
+            instr(rest),
+            None,
+            price,
+            Decimal::ZERO,
+            credit,
+        );
     }
     if label.contains("FRAIS") {
-        return (TxType::Fee, None, None, None, debit.unwrap_or(Decimal::ZERO), Some(cash_amount));
+        return (
+            TxType::Fee,
+            None,
+            None,
+            None,
+            debit.unwrap_or(Decimal::ZERO),
+            Some(cash_amount),
+        );
     }
     if label.starts_with("INVESTISSEMENT ESPECES")
         || label.starts_with("REGULARISATION")
         || label.starts_with("ESPECES SUR OST")
     {
-        return (TxType::Cash, None, None, None, Decimal::ZERO, Some(cash_amount));
+        return (
+            TxType::Cash,
+            None,
+            None,
+            None,
+            Decimal::ZERO,
+            Some(cash_amount),
+        );
     }
 
-    warnings.push(format!("ligne {row}: opération non reconnue « {label} », classée OTHER"));
-    (TxType::Other, None, qty, price, Decimal::ZERO, Some(cash_amount))
+    warnings.push(format!(
+        "ligne {row}: opération non reconnue « {label} », classée OTHER"
+    ));
+    (
+        TxType::Other,
+        None,
+        qty,
+        price,
+        Decimal::ZERO,
+        Some(cash_amount),
+    )
 }
 
 #[cfg(test)]
@@ -173,8 +250,17 @@ Date,Désignation,Qté,Cours,Crédit (€),Débit (€)
 
     #[test]
     fn detects_headers() {
-        let headers: Vec<String> =
-            ["Date", "Désignation", "Qté", "Cours", "Crédit (€)", "Débit (€)"].iter().map(|s| s.to_string()).collect();
+        let headers: Vec<String> = [
+            "Date",
+            "Désignation",
+            "Qté",
+            "Cours",
+            "Crédit (€)",
+            "Débit (€)",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert!(detect(&headers));
     }
 
@@ -183,7 +269,10 @@ Date,Désignation,Qté,Cours,Crédit (€),Débit (€)
         let parsed = parse(SAMPLE).unwrap();
         let t = &parsed.transactions[0];
         assert_eq!(t.tx_type, TxType::TransferIn);
-        assert_eq!(t.instrument.as_ref().unwrap().symbol.as_deref(), Some("DSY.PA"));
+        assert_eq!(
+            t.instrument.as_ref().unwrap().symbol.as_deref(),
+            Some("DSY.PA")
+        );
         assert_eq!(t.quantity, Some(dec!(33)));
         assert_eq!(t.unit_price, Some(dec!(38.0703)));
     }
@@ -197,7 +286,7 @@ Date,Désignation,Qté,Cours,Crédit (€),Débit (€)
             vec![
                 TxType::TransferIn,
                 TxType::Dividend,
-                TxType::Sell,  // indemnisation Atos => cession forcée
+                TxType::Sell, // indemnisation Atos => cession forcée
                 TxType::Buy,
                 TxType::Fee,
                 TxType::Other, // transfert valeur interne
