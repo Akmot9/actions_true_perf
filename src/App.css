@@ -1,28 +1,51 @@
 /* ————————————————————————————————————————————————
    Pupitre d'ordres — système de design adaptatif
-   OLED sombre, surfaces tactiles et chiffres tabulaires.
+   Clair/sombre système : neutres Apple le jour,
+   nuit & laiton OLED le soir. Chiffres tabulaires.
    ———————————————————————————————————————————————— */
 
 :root {
-  color-scheme: dark;
-  --bg: #090c13;
-  --panel: #111722;
-  --panel-2: #182131;
-  --line: #263248;
-  --ink: #f3f1ea;
-  --muted: #8f9bb0;
-  --brass: #f0b94b;
-  --gain: #4bd399;
-  --loss: #ff6670;
-  --warn: #f0b94b;
+  color-scheme: light dark;
+
+  /* Mode clair */
+  --bg: #f5f5f7;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --line: rgb(29 29 31 / 10%);
+  --ink: #1d1d1f;
+  --muted: #6e6e73;
+  --brass: #9c6407;
+  --on-brass: #ffffff;
+  --gain: #157f57;
+  --loss: #cf3444;
+  --warn: #9c6407;
   --radius: 14px;
+  --radius-lg: 18px;
+  --pill: 980px;
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
 
-  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   --font-num: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #090c13;
+    --panel: #111722;
+    --panel-2: #182131;
+    --line: #263248;
+    --ink: #f3f1ea;
+    --muted: #8f9bb0;
+    --brass: #f0b94b;
+    --on-brass: #1a1608;
+    --gain: #4bd399;
+    --loss: #ff6670;
+    --warn: #f0b94b;
+  }
 }
 
 * {
@@ -40,10 +63,16 @@ body {
   min-width: 320px;
   min-height: 100%;
   min-height: 100dvh;
-  background-image:
-    radial-gradient(circle at 15% -10%, rgba(240, 185, 75, 0.08), transparent 32rem),
-    linear-gradient(180deg, #0c1019 0%, var(--bg) 32rem);
   overscroll-behavior-y: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  html,
+  body {
+    background-image:
+      radial-gradient(circle at 15% -10%, rgba(240, 185, 75, 0.08), transparent 32rem),
+      linear-gradient(180deg, #0c1019 0%, var(--bg) 32rem);
+  }
 }
 
 button,
@@ -114,23 +143,25 @@ input {
 }
 
 .btn {
-  min-height: 40px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
   font: inherit;
+  font-weight: 600;
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 14px;
+  border-radius: var(--pill);
+  padding: 8px 18px;
   cursor: pointer;
-  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+  transition: border-color 0.2s var(--ease), background 0.2s var(--ease), transform 0.2s var(--ease);
 }
 
 .btn:hover {
   border-color: var(--brass);
+  transform: scale(1.02);
 }
 
 .btn:focus-visible,
@@ -139,10 +170,33 @@ input {
   outline-offset: 2px;
 }
 
+:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+/* Apparition douce du contenu au chargement. */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .app > * {
+    animation: fade-up 0.4s var(--ease) both;
+  }
+}
+
 .btn.primary {
   background: var(--brass);
   border-color: var(--brass);
-  color: #1a1608;
+  color: var(--on-brass);
   font-weight: 600;
 }
 
@@ -201,7 +255,7 @@ input {
   min-height: 24px;
   padding: 3px 8px;
   border-radius: 999px;
-  color: #1a1608;
+  color: var(--on-brass);
   background: var(--brass);
   font-size: 10px;
   font-weight: 700;
@@ -249,7 +303,7 @@ input {
   min-width: 0;
   padding: 14px 15px;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
 }
