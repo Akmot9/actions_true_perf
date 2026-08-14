@@ -34,6 +34,7 @@ jobs:
       APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}
       APPSTORE_ISSUER_ID: ${{ vars.APPSTORE_ISSUER_ID }}
       APPSTORE_API_KEY_ID: ${{ vars.APPSTORE_API_KEY_ID }}
+      IOS_PROFILE_NAME: ${{ vars.IOS_PROFILE_NAME || 'Suivi des ordres App Store' }}
 
     steps:
       - name: Récupérer le dépôt
@@ -133,6 +134,30 @@ jobs:
           if [[ ! -d src-tauri/gen/apple ]]; then
             deno task tauri ios init --ci --config "$IOS_TAURI_CONFIG"
           fi
+
+      - name: Forcer la signature manuelle avec le profil App Store
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Le projet généré par Tauri utilise la signature automatique, qui
+          # exige un compte Apple connecté dans Xcode. En CI on signe
+          # manuellement avec le certificat Distribution importé et le profil
+          # App Store téléchargé.
+          ruby - <<'RUBY'
+          require "yaml"
+          path = "src-tauri/gen/apple/project.yml"
+          spec = YAML.load_file(path)
+          target = spec["targets"].keys.find { |k| k.end_with?("_iOS") }
+          raise "cible iOS introuvable dans #{path}" unless target
+          base = ((spec["targets"][target]["settings"] ||= {})["base"] ||= {})
+          base["CODE_SIGN_STYLE"] = "Manual"
+          base["CODE_SIGN_IDENTITY"] = "Apple Distribution"
+          base["DEVELOPMENT_TEAM"] = ENV.fetch("APPLE_DEVELOPMENT_TEAM")
+          base["PROVISIONING_PROFILE_SPECIFIER"] = ENV.fetch("IOS_PROFILE_NAME")
+          File.write(path, spec.to_yaml)
+          puts "Signature manuelle configurée pour #{target}"
+          RUBY
+          (cd src-tauri/gen/apple && xcodegen generate)
 
       - name: Construire l’IPA signée
         shell: bash
