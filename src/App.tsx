@@ -865,6 +865,18 @@ export default function App() {
   // Deux clics plutôt que window.confirm (absent du WebView iOS/macOS).
   const [confirmDemoDelete, setConfirmDemoDelete] = createSignal(false);
 
+  // Bandeau des totaux : compact quand on défile (hystérésis anti-va-et-vient).
+  const [scrolled, setScrolled] = createSignal(false);
+  onMount(() => {
+    const onScroll = () => {
+      const y = window.scrollY;
+      setScrolled((prev) => (prev ? y > 90 : y > 170));
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onCleanup(() => window.removeEventListener("scroll", onScroll));
+  });
+
   async function onDeleteDemo() {
     if (!confirmDemoDelete()) {
       setConfirmDemoDelete(true);
@@ -887,7 +899,7 @@ export default function App() {
     <main class="app">
       <header class="topbar">
         <h1>
-          <span>Suivi des ordres</span>
+          <span>TruePerf</span>
           <span class="tagline">performance par lot d'acquisition</span>
         </h1>
         <div class="actions">
@@ -944,7 +956,10 @@ export default function App() {
                 </button>
               </section>
             </Show>
-            <section class="totals" aria-label="Totaux du portefeuille">
+            <section
+              class={`totals${scrolled() ? " scrolled" : ""}`}
+              aria-label="Totaux du portefeuille"
+            >
               <div class="total total-primary">
                 <span class="label">Valeur</span>
                 <span class="value num">{eur(p().total_market_value)}</span>
