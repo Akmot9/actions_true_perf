@@ -16,3 +16,6 @@ AuthKey_*.p8
 # Références de design locales (artwork tiers, non distribuable)
 design/1024x1024bb.png
 design/patron-icone*.svg
+
+# Captures iPhone locales
+IMG_*.PNG
