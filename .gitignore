@@ -12,3 +12,7 @@ apple-signing/
 AuthKey_*.p8
 *.p12
 *.mobileprovision
+
+# Références de design locales (artwork tiers, non distribuable)
+design/1024x1024bb.png
+design/patron-icone*.svg
