@@ -58,5 +58,5 @@ fn main() {
 /// (Linux : ~/.local/share/<identifier>).
 fn dirs_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").expect("HOME non défini");
-    Path::new(&home).join(".local/share/com.actions_true_perf.app")
+    Path::new(&home).join(".local/share/com.akmot9.suiviordres")
 }

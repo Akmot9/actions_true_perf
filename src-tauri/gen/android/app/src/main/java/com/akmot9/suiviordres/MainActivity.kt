@@ -1,4 +1,4 @@
-package com.actions_true_perf.app
+package com.akmot9.suiviordres
 
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
