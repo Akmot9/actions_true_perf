@@ -165,6 +165,7 @@ jobs:
           base["CODE_SIGN_IDENTITY"] = "Apple Distribution"
           base["DEVELOPMENT_TEAM"] = ENV.fetch("APPLE_DEVELOPMENT_TEAM")
           base["PROVISIONING_PROFILE_SPECIFIER"] = ENV.fetch("IOS_PROFILE_NAME")
+          base["TARGETED_DEVICE_FAMILY"] = "1" # iPhone uniquement
           File.write(path, spec.to_yaml)
           puts "Signature manuelle configurée pour #{target}"
           RUBY
