@@ -159,6 +159,12 @@ jobs:
           RUBY
           (cd src-tauri/gen/apple && xcodegen generate)
 
+          # L'app n'utilise que du HTTPS standard : déclarer l'exemption de
+          # chiffrement pour que TestFlight n'attende pas de réponse manuelle.
+          ios_plist="$(find src-tauri/gen/apple -maxdepth 2 -name Info.plist -path '*_iOS/*' -print -quit)"
+          /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$ios_plist" \
+            || /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" "$ios_plist"
+
           # L'export de l'archive a lui aussi besoin du mapping bundle → profil.
           cat > src-tauri/gen/apple/ExportOptions.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
