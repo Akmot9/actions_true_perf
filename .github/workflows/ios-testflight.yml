@@ -135,6 +135,17 @@ jobs:
             deno task tauri ios init --ci --config "$IOS_TAURI_CONFIG"
           fi
 
+      - name: Installer les icônes de l’app dans le projet Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          # « ios init » remplit le catalogue avec les icônes Tauri par défaut ;
+          # « tauri icon » n'écrit dans gen/apple que s'il existe déjà. Les
+          # fichiers de src-tauri/icons/ios portent exactement les mêmes noms
+          # que ceux du template : on les copie par-dessus.
+          cp src-tauri/icons/ios/AppIcon-*.png \
+             src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
+
       - name: Forcer la signature manuelle avec le profil App Store
         shell: bash
         run: |
