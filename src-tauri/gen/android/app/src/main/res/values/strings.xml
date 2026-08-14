@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">"actions_true_perf"</string>
-    <string name="main_activity_title">"actions_true_perf"</string>
+    <string name="app_name">"TruePerf"</string>
+    <string name="main_activity_title">"TruePerf"</string>
 </resources>
