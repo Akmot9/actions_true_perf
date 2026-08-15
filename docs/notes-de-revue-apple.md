@@ -20,8 +20,9 @@ et les versions d’iOS testés changent d’une soumission à l’autre.
 >
 > **1. Screen recording**
 >
-> A screen recording captured on a physical iPhone running iOS `<VERSION>`,
-> starting from app launch and covering the full user flow, is attached.
+> A screen recording captured on a physical iPhone 17 Pro Max running iOS
+> `<VERSION>`, starting from app launch and covering the full user flow, is
+> attached.
 >
 > The app has none of the flows listed in the review guidelines: no account
 > registration, login or deletion; no paid content, purchase or subscription; no
@@ -32,9 +33,8 @@ et les versions d’iOS testés changent d’une soumission à l’autre.
 >
 > **2. Devices and operating systems tested**
 >
-> - `<iPhone MODEL>` — iOS `<VERSION>` (physical device, build installed via
+> - iPhone 17 Pro Max — iOS `<VERSION>` (physical device, build installed via
 >   TestFlight)
-> - iOS Simulator, iPhone `<MODEL>`, iOS `<VERSION>` (Xcode 26)
 >
 > The app is iPhone-only (`TARGETED_DEVICE_FAMILY = 1`).
 >
@@ -151,8 +151,12 @@ d’écran iOS, environ 60 à 90 secondes, sur le build TestFlight soumis.
 
 ## Vérifications avant chaque soumission
 
-- Renseigner les modèles d’iPhone et les versions d’iOS réellement testés. Une
-  réponse vague sur ce point relance un refus.
+- Renseigner la version d’iOS réellement installée sur l’iPhone de test, relevée
+  dans **Réglages → Général → Informations → Version du logiciel**. Une réponse
+  vague sur ce point relance un refus.
+- Ne lister que les appareils sur lesquels le build a effectivement été lancé.
+  Le build est produit en CI sans Mac : il n’y a pas de test sur simulateur à
+  déclarer tant qu’aucun n’a été fait.
 - Joindre la vidéo à la soumission ou à la réponse à l’équipe de revue.
 - Recopier le texte ci-dessus dans **App Review Information → Notes**.
 - Vérifier que la **Privacy Policy URL** de la fiche pointe vers une version
