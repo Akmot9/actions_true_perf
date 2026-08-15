@@ -21,8 +21,7 @@ et les versions d’iOS testés changent d’une soumission à l’autre.
 > **1. Screen recording**
 >
 > A screen recording captured on a physical iPhone 17 Pro Max running iOS
-> `<VERSION>`, starting from app launch and covering the full user flow, is
-> attached.
+> 26.6, starting from app launch and covering the full user flow, is attached.
 >
 > The app has none of the flows listed in the review guidelines: no account
 > registration, login or deletion; no paid content, purchase or subscription; no
@@ -33,7 +32,7 @@ et les versions d’iOS testés changent d’une soumission à l’autre.
 >
 > **2. Devices and operating systems tested**
 >
-> - iPhone 17 Pro Max — iOS `<VERSION>` (physical device, build installed via
+> - iPhone 17 Pro Max — iOS 26.6 (physical device, build installed via
 >   TestFlight)
 >
 > The app is iPhone-only (`TARGETED_DEVICE_FAMILY = 1`).
