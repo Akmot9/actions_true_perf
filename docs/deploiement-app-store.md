@@ -170,8 +170,14 @@ Une fois le build traité par Apple :
 4. publier une politique de confidentialité accessible par URL et depuis l’app ;
 5. déclarer précisément les pratiques de collecte de données ;
 6. répondre aux questions sur le chiffrement et les droits sur les contenus ;
-7. choisir le build dans la version iOS puis **Add for Review** et **Submit for
+7. remplir **App Review Information → Notes** avec le texte des
+   [notes de revue Apple](./notes-de-revue-apple.md) et joindre la vidéo de
+   démonstration qui y est décrite ;
+8. choisir le build dans la version iOS puis **Add for Review** et **Submit for
    Review**.
+
+L’étape 7 n’est pas facultative : la soumission du 14 août 2026 a été refusée au
+titre de la guideline 2.1 — *Information Needed* parce que ce champ était vide.
 
 Pour un iPhone 17 Pro Max, Apple accepte notamment les captures portrait
 `1320 × 2868`, `1290 × 2796` ou `1260 × 2736` pixels.
@@ -183,4 +189,7 @@ Pour un iPhone 17 Pro Max, Apple accepte notamment les captures portrait
 - les captures App Store finales ;
 - une description et les informations de contact demandées par la revue ;
 - la vérification de l’import CSV et du stockage local sur un véritable iPhone
-  via TestFlight.
+  via TestFlight ;
+- l’enregistrement vidéo sur iPhone physique, et la liste des modèles et
+  versions d’iOS testés, exigés par la revue — voir les
+  [notes de revue Apple](./notes-de-revue-apple.md).
